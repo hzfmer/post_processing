@@ -8,12 +8,9 @@ Add a short description here!
 
 Description
 ===========
-
-A longer description of your project goes here...
+Some poor-organized codes for processing. To be revised, in the far future.
 
 
 Note
 ====
 
-This project has been set up using PyScaffold 3.2.2. For details and usage
-information on PyScaffold see https://pyscaffold.org/.
