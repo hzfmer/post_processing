@@ -310,5 +310,64 @@ def pick_psa(models, osc_freqs=np.logspace(-1, 1, 91), osc_damping=0.05):
             
     return rotd_rec, {k:rotd_syn[k] for k in models}
 
+
+def plot_validation(isite, models, shift=24, lowcut=lowf, highcut=highf, metrics=['vel', 'pas']):
+    vel_rec, vel_syn = pick_vel(models)
+    psa_rec, psa_syn = pick_psa(models)
+    
+    site_name = syn_sites[isite][0]
+    if not vel_rec[site_name]:
+        return None
+    ix, iy = syn_sites[isite][1:]
+    dt_rec = vel_rec[site_name]['dt']   
+    len_rec = len(vel_rec[site_name]['X'])
+    len_syn = len(vel_syn[models[0]][site_name]['X'])
+    t_rec = np.arange(len_rec) * dt_rec
+    
+    comp = {0: "X", 1: "Y", 2: "Z"}
+    image =[]
+    if 'vel' in metrics:
+        fig, ax = plt.subplots(3, 1, dpi=400)
+        fig.tight_layout()
+        fig.suptitle(f'{site_name}')
+        for i in range(3):   
+            vel = filt_B(vel_rec[site_name][comp[i]],1 / dt_rec, causal=False)
+            ax[i].plot(t_rec, vel, label='rec')
+            for model in models:
+                dt_syn = vel_syn[model][site_name]['dt']
+                len_syn = len(vel_syn[model][site_name]['X'])
+                t_syn = np.arange(len_syn) * dt_syn + shift
+                vel = filt_B(vel_syn[model][site_name][comp[i]], 1 / dt_syn, causal=False)
+                ax[i].plot(t_syn, vel, label=model)
+
+            ax[i].set_ylabel(f'V{comp[i]} (m/s)')
+            ax[i].set_xlim(shift)
+        ax[-1].set_xlabel('Time (s)')
+        ax[0].legend()
+        fig.canvas.draw()
+        temp = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
+        image += [temp.reshape(fig.canvas.get_width_height()[::-1] + (3,))]
+    
+    if 'psa' in metrics:
+        fig, ax = plt.subplots(dpi=400)
+        fig.tight_layout()
+        fig.suptitle(f'{site_name}') 
+        psa = psa_rec[site_name]
+        ax.plot(psa.osc_freq, psa.spec_accel, label='rec')
+        for model in models:
+            psa = psa_syn[model][site_name]
+            ax.plot(psa.osc_freq, psa.spec_accel, label=model)
+        ax.set(ylabel=f'$SA (m/s^2)$', xscale='log', yscale='log')
+        ax.xaxis.grid(True, which='both')
+        ax.yaxis.grid(True, which='both')
+        ax.set_xlabel('Frequency (Hz)')
+        ax.legend()
+        fig.canvas.draw()
+        temp = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
+        image += [temp.reshape(fig.canvas.get_width_height()[::-1] + (3,))]
+                             
+    return image
+
+
 if __name__ == "__main__":
     print("Nothing to tell you")
