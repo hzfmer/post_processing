@@ -53,6 +53,19 @@ def filt(vel, dt=1, lowcut=0.15, highcut=5, causal=False):
     return data
 
 
+def rotate(vel, angle):
+    '''Rotate the horizontal velocities by angel degree
+    Input
+        vel:   dict with 'X' and 'Y' components or list of [velx, vely]
+    '''
+    if issubclass(type(vel), dict):
+        vel['X'], vel['Y'] = rotate([vel['X'], vel['Y']], angle)
+        return vel
+    angle = np.radians(angle)
+    vx, vy = vel[0], vel[1]
+    vx, vy = vx * np.cos(angle) - vy * np.sin(angle), vx * np.sin(angle) + vy * np.cos(angle)
+    return vx, vy
+
 def check_mesh_cont(fmesh_0, fmesh_1, nx, ny, nz, verbose=False, nvar=3, skip=3):
     max_diff = 0
     with open(fmesh_0, 'rb') as f0, open(fmesh_1, 'rb') as f1:
@@ -283,6 +296,8 @@ def plot_validation(site_name, models, shift=24, lowcut=0.15, highcut=5, metrics
     with open('results/vel_syn.pickle', 'rb') as fid:
         vel_syn = pickle.load(fid)
     print(models)
+    if 'rec' in models:
+        model.remove('rec')
     if not vel_rec[site_name]:
         return None
     dt_rec = vel_rec[site_name]['dt']   
