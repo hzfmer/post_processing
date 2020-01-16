@@ -25,6 +25,8 @@ __license__ = "mit"
 
 
 def read_params(model):
+    '''Read parameters from local "param.sh"
+    '''
     with open(Path(model, 'param.sh'), 'r') as fid:
         for line in fid:
             if "TMAX" in line:
@@ -41,6 +43,11 @@ def read_params(model):
 
 
 def filt(vel, dt=1, lowcut=0.15, highcut=5, causal=False):
+    '''Filter data
+    Input:
+        vel     dict.keys=['dt', 'X', 'Y', 'Z'], or list
+        rest    parameters for Butterworth filters.
+    '''
     if not issubclass(type(vel), dict):
         return filt_B(vel, 1 / dt, lowcut, highcut, causal=causal) 
     keys = list(vel.keys())
@@ -67,6 +74,14 @@ def rotate(vel, angle):
     return vx, vy
 
 def check_mesh_cont(fmesh_0, fmesh_1, nx, ny, nz, verbose=False, nvar=3, skip=3):
+    '''Check continuity between upper and lower blocks
+    Input:
+        fmesh_0: Upper block
+        fmesh_1: Lower block
+        nx, ny, nz: 3D dimensions of the upper block
+        nvar: Number of variables in the block mesh
+        skip: Ratio of dimensions between lower and upper block
+    '''
     max_diff = 0
     with open(fmesh_0, 'rb') as f0, open(fmesh_1, 'rb') as f1:
         f0.seek(4 * nvar * nx * ny * (nz - 8), 0)
@@ -97,6 +112,13 @@ def check_mesh_cont(fmesh_0, fmesh_1, nx, ny, nz, verbose=False, nvar=3, skip=3)
 
 
 def read_snapshot(it, mx, my, model="", case="", comp="X"):
+    '''Read wave field snapshot
+    Input:
+        it: time step to read
+        mx, my: Surface 2D dimensions
+        model: the name of the model
+        case: different cases of a model, if exists
+    '''
     tmax, dt, tskip, wstep, _ = read_params(model)
     nt = int(tmax / dt)
     model = Path(model, "output_sfc" if not case else f"output_sfc_{case}")
@@ -113,6 +135,14 @@ def read_snapshot(it, mx, my, model="", case="", comp="X"):
 
 
 def read_rec(site, metric='vel'):
+    '''Read recordings from USC database
+    Input:
+        site, site name
+
+    Return:
+        data: Dictionary of "metric" 
+    '''
+
     r = requests.get(f'http://hypocenter.usc.edu/research/High-F/lahabra_obs_2019_05_31/{site}.V2')
     if r.status_code != 200:
         print(f"the site {site} not found on the server")
@@ -144,6 +174,12 @@ def read_rec(site, metric='vel'):
 
 
 def read_syn(ix, iy, mx, my, model="", case=""):
+    '''Read synthetics
+    Input:
+        ix, iy: Indices of site
+        mx, my: Surface dimensions
+    '''
+
     data = collections.defaultdict(list)
     _, dt_syn, tskip, wstep, nfile = read_params(model)
     print(model, dt_syn, tskip, wstep, nfile)
@@ -170,6 +206,12 @@ def read_syn(ix, iy, mx, my, model="", case=""):
 
 
 def pick_vel(mx, my, models, syn_sites={}):
+    '''Pick velocities from computed outptu
+    
+    When running for the first time, models should be the complete tested models available.
+    In the following, this function can amend additional models, and save it to the existing data     file.
+
+    '''
     try: 
         with open('results/vel_rec.pickle', 'rb') as fid:
             vel_rec = pickle.load(fid)
@@ -215,6 +257,7 @@ def pick_psa(mx, my, models, osc_freqs=np.logspace(-1, 1, 91), osc_damping=0.05,
     If psa pickle files don't exist, create them.
     If some other models are queried, compute them and append to psa files.
     '''
+
     try: 
         with open('results/psa_rec.pickle', 'rb') as fid:
             rotd_rec = pickle.load(fid)
@@ -270,8 +313,9 @@ def pick_psa(mx, my, models, osc_freqs=np.logspace(-1, 1, 91), osc_damping=0.05,
     return rotd_rec, {k:rotd_syn[k] for k in models}
 
 
-#def comp_dur(
 def plot_snapshot(it, mx, my, model="", case="", draw=False, backend="inline"):   
+    '''Pot surface wave field
+    '''
     vx, dt = read_snapshot(it, mx, my, model=model, case=case)
     fig, ax = plt.subplots()
     im = ax.imshow(vx.T,cmap='bwr')
@@ -288,7 +332,9 @@ def plot_snapshot(it, mx, my, model="", case="", draw=False, backend="inline"):
     return image
 
 
-def plot_validation(site_name, models, shift=24, lowcut=0.15, highcut=5, metrics=['vel', 'pas'], syn_sites={}, backend="inline", plot_rec=True):
+def plot_validation(site_name, models, shift=21.5, lowcut=0.15, highcut=5, metrics=['vel', 'pas'], syn_sites={}, backend="inline", plot_rec=True):
+    '''Plot comparison among multiple models
+    '''
     #vel_rec, vel_syn = pick_vel(0, 0, models)
     #psa_rec, psa_syn = pick_psa(0, 0, models)  # use 0 because we have always prepared these dicts.
     with open('results/vel_rec.pickle', 'rb') as fid:
@@ -353,6 +399,8 @@ def plot_validation(site_name, models, shift=24, lowcut=0.15, highcut=5, metrics
 
 
 def comp_cum_energy(vel, dt=0.01):
+    '''Compute cumulative energy from velociteis
+    '''
     if issubclass(type(vel), dict):
         dt = vel['dt']
         keys = list(vel.keys())
@@ -365,7 +413,9 @@ def comp_cum_energy(vel, dt=0.01):
     return np.cumsum(vel ** 2) * dt
 
 
-def plot_cum_energy(site_name, models, shift=24, lowcut=0.15, highcut=5, syn_sites={}, backend="inline", plot_rec=True):
+def plot_cum_energy(site_name, models, shift=21.5, lowcut=0.15, highcut=5, syn_sites={}, backend="inline", plot_rec=True):
+    '''Plot cumulative energy time histories
+    '''
     vel_rec, vel_syn = pick_vel(0, 0, models)
     
     site_name = syn_sites[isite][0]
@@ -407,4 +457,4 @@ def plot_cum_energy(site_name, models, shift=24, lowcut=0.15, highcut=5, syn_sit
 
 
 if __name__ == "__main__":
-    print("Nothing to tell you")
+    print("Leave it so.")
