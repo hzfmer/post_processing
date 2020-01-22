@@ -134,11 +134,11 @@ def read_snapshot(it, mx, my, model="", case="", comp="X"):
     return v, dt
 
 
-def read_rec(site, metric='vel'):
+def read_rec(site, metric='vel', base_shift=581.8):
     '''Read recordings from USC database
     Input:
         site, site name
-
+        base_shift, correct start time, supposed to be 04:09:42.97
     Return:
         data: Dictionary of "metric" 
     '''
@@ -150,7 +150,7 @@ def read_rec(site, metric='vel'):
     recordings = r.text.split('\r\n')
 
     stime = re.findall(r'\d+:\d+:\d+', recordings[4].split(',')[1])[0].split(':')
-    channel = {1: "X", 2: "Z", 3: "Y"}
+    channel = {1: "Y", 2: "Z", 3: "X"}
     count = 0
     data = {}
     for i in range(len(recordings)):
@@ -170,6 +170,7 @@ def read_rec(site, metric='vel'):
             # data[channel[count]] = filt_B(np.array(data[channel[count]], dtype='float32'),1 / dt_rec, causal=False)
     print(f"Number of points = {npts}, dt_recording = {dt_rec}")
     data["dt"] = dt_rec
+    data['shift'] = base_shift - (float(stime[-2]) * 60 + float(stime[-1]))
     return data
 
 
@@ -205,7 +206,7 @@ def read_syn(ix, iy, mx, my, model="", case=""):
     return data
 
 
-def pick_vel(mx, my, models, syn_sites={}):
+def pick_vel(mx=0, my=0, models=[], syn_sites={}):
     '''Pick velocities from computed outptu
     
     When running for the first time, models should be the complete tested models available.
@@ -213,19 +214,16 @@ def pick_vel(mx, my, models, syn_sites={}):
 
     '''
     try: 
-        with open('results/vel_rec.pickle', 'rb') as fid:
-            vel_rec = pickle.load(fid)
         with open('results/vel_syn.pickle', 'rb') as fid:
             vel_syn = pickle.load(fid)
 
     except Exception as e:
         print("Error: ", e, "\nRebuild vel database")
-        vel_rec = {}
         vel_syn = collections.defaultdict(dict)
     
-    if all(x in vel_syn.keys() for x in models):
+    if not models or all(x in vel_syn.keys() for x in models):
         print("Models queried!")
-        return vel_rec, {k:vel_syn[k] for k in models}
+        return {k:vel_syn[k] for k in models} if models else vel_syn
     init_len = len(vel_syn)
     _models = models.copy()
     for key in vel_syn.keys():
@@ -235,21 +233,19 @@ def pick_vel(mx, my, models, syn_sites={}):
         site_name = syn_sites[isite][0]
         print(f'Gathering {len(_models)} ground motions at site {site_name}')
         ix, iy = syn_sites[isite][1:]
-        if site_name not in vel_rec:
-            vel_rec[site_name] = read_rec(site_name)
+        if site_name not in vel_syn['rec']:
+            vel_syn['rec'][site_name] = read_rec(site_name)
         for model in _models:
             if model not in vel_syn.keys():
                 vel_syn[model] = dict()
             vel_syn[model][site_name] = read_syn(ix, iy, mx, my, model=model) 
             
     if len(vel_syn) > init_len:
-        with open('results/vel_rec.pickle', 'wb') as fid:
-            pickle.dump(vel_rec, fid, protocol=pickle.HIGHEST_PROTOCOL)
         with open('results/vel_syn.pickle', 'wb') as fid:
             pickle.dump(vel_syn, fid, protocol=pickle.HIGHEST_PROTOCOL)
             
             
-    return vel_rec, {k: vel_syn[k] for k in models}
+    return {k: vel_syn[k] for k in models}
 
 
 def pick_psa(mx, my, models, osc_freqs=np.logspace(-1, 1, 91), osc_damping=0.05, syn_sites={}):
@@ -277,7 +273,7 @@ def pick_psa(mx, my, models, osc_freqs=np.logspace(-1, 1, 91), osc_damping=0.05,
     for key in rotd_syn.keys():
         if key in _models:
             _models.remove(key)
-    vel_rec, vel_syn = pick_vel(mx, my, models.copy(), syn_sites)
+    vel_syn = pick_vel(mx, my, models.copy(), syn_sites)
             
     for isite in range(len(syn_sites)):
         print(f"\rComputing site {isite} / {len(syn_sites)}", end="\r", flush=True)
@@ -285,7 +281,7 @@ def pick_psa(mx, my, models, osc_freqs=np.logspace(-1, 1, 91), osc_damping=0.05,
         if site_name not in rotd_rec:
             print(f"\nGathering rotd_rec for {site_name}\n")
             # If site not found on the server
-            if not vel_rec[site_name]:
+            if not vel_syn['rec'][site_name]:
                 continue
             accx, accy = (np.diff(x, prepend=0) / vel_rec[site_name]['dt'] \
                           for x in [vel_rec[site_name]['X'], vel_rec[site_name]['Y']])
@@ -332,18 +328,13 @@ def plot_snapshot(it, mx, my, model="", case="", draw=False, backend="inline"):
     return image
 
 
-def plot_validation(site_name, models, shift=21.5, lowcut=0.15, highcut=5, metrics=['vel', 'pas'], syn_sites={}, backend="inline", plot_rec=True):
+def plot_validation(site_name, models, lowcut=0.15, highcut=5, metrics=['vel', 'pas'], syn_sites={}, backend="inline", plot_rec=True):
     '''Plot comparison among multiple models
     '''
-    #vel_rec, vel_syn = pick_vel(0, 0, models)
-    #psa_rec, psa_syn = pick_psa(0, 0, models)  # use 0 because we have always prepared these dicts.
-    with open('results/vel_rec.pickle', 'rb') as fid:
-        vel_rec = pickle.load(fid)
     with open('results/vel_syn.pickle', 'rb') as fid:
         vel_syn = pickle.load(fid)
     print(models)
-    if 'rec' in models:
-        model.remove('rec')
+    vel_rec = vel_syn['rec']
     if not vel_rec[site_name]:
         return None
     dt_rec = vel_rec[site_name]['dt']   
@@ -362,6 +353,7 @@ def plot_validation(site_name, models, shift=21.5, lowcut=0.15, highcut=5, metri
             for model in models:
                 dt_syn = vel_syn[model][site_name]['dt']
                 len_syn = len(vel_syn[model][site_name][comp[i]])
+                shift = vel_syn['rec'][site_name]['shift']
                 t_syn = np.arange(len_syn) * dt_syn + shift
                 vel = filt_B(vel_syn[model][site_name][comp[i]], 1 / dt_syn, lowcut=lowcut, highcut=highcut, causal=False)
                 ax[i].plot(t_syn, vel, lw=0.8, label=model + f", Max = {np.max(vel):.4f}")
@@ -398,61 +390,71 @@ def plot_validation(site_name, models, shift=21.5, lowcut=0.15, highcut=5, metri
     return image if backend == "inline" else [fig, fig2]
 
 
-def comp_cum_energy(vel, dt=0.01):
+def comp_cum_energy(vel, dt=0.01, lowcut=0.15, highcut=5):
     '''Compute cumulative energy from velociteis
     '''
     if issubclass(type(vel), dict):
         dt = vel['dt']
         keys = list(vel.keys())
         keys.remove('dt')
+        if 'shift' in keys:
+            keys.remove('shift')
         cumvel = np.zeros((len(vel[keys[0]]),), dtype='float32')
         for k in keys:
-            cumvel += comp_cum_energy(vel[k], dt=dt)
+            v = filt(vel[k], dt=dt, lowcut=lowcut, highcut=highcut)
+            cumvel += comp_cum_energy(v, dt=dt)
         return cumvel / len(keys) * dt
     vel = np.array(vel)
     return np.cumsum(vel ** 2) * dt
 
 
-def plot_cum_energy(site_name, models, shift=21.5, lowcut=0.15, highcut=5, syn_sites={}, backend="inline", plot_rec=True):
+def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, syn_sites={}, backend="inline", seed=None, plot_rec=True):
     '''Plot cumulative energy time histories
     '''
-    vel_rec, vel_syn = pick_vel(0, 0, models)
-    
-    site_name = syn_sites[isite][0]
-    if not vel_rec[site_name]:
-        plot_rec = False
-    else:
-        dt_rec = vel_rec[site_name]['dt']   
-        len_rec = len(vel_rec[site_name]['X'])
-        t_rec = np.arange(len_rec) * dt_rec
-    len_syn = len(vel_syn[models[0]][site_name]['X'])
-    
-    comp = {0: "X", 1: "Y", 2: "Z"}
-    image =[]
-    fig, ax = plt.subplots(3, 1, dpi=400)
+    vel_syn = pick_vel()
+    fig, ax= plt.subplots(nrow, ncol, dpi=200)
     fig.tight_layout()
-    fig.suptitle(f'{site_name}')
-    for i in range(3):   
-        if plot_rec:
-            vel = filt_B(vel_rec[site_name][comp[i]], 1 / dt_rec, lowcut=lowcut, highcut=highcut, causal=False)
-            vel = np.cumsum(vel ** 2)
-            ax[i].plot(t_rec, vel, label='rec')
+    if seed:
+        np.random.seed(seed)
+    nsites = np.random.rand(len(syn_sites)).argsort()
+    print(nsites)
+    i = -1
+    for j in nsites:
+        site_name = syn_sites[j][0]
+        print(syn_sites[j][:])
+        i += 1
+        if i > nrow * ncol - 1:
+            break
+        row, col = i // ncol, i % ncol
+        if col == ncol - 1:
+            if row == nrow - 2:
+                ax[row, col].legend(*ax[0][0].get_legend_handles_labels(), loc='upper left', bbox_to_anchor=(-0.25, 1.5))
+                ax[row, col].set_frame_on(False)
+                ax[row, col].set_xticks([], [])
+                ax[row, col].set_yticks([], [])
+                continue
+            if row == nrow - 1:
+                ax[row, col].set_frame_on(False)
+                ax[row, col].set_xticks([], [])
+                ax[row, col].set_yticks([], [])
+                break
+        
         for model in models:
-            dt_syn = vel_syn[model][site_name]['dt']
-            len_syn = len(vel_syn[model][site_name]['X'])
-            t_syn = np.arange(len_syn) * dt_syn + shift
-            vel = filt_B(vel_syn[model][site_name][comp[i]], 1 / dt_syn, lowcut=lowcut, highcut=highcut, causal=False)
-            ax[i].plot(t_syn, vel, lw=1, label=model)
+            cumvel = comp_cum_energy(vel_syn[model][site_name], highcut=highcut)
+            ax[row, col].plot(vel_syn[model][site_name]['dt'] * np.arange(len(vel_syn[model][site_name]['X'])), cumvel, label=model)
+        cumvel = comp_cum_energy(vel_syn['rec'][site_name], highcut=highcut)
+        shift = vel_syn['rec'][site_name]['shift']
+        ax[row, col].plot(vel_syn['rec'][site_name]['dt'] * np.arange(len(vel_syn['rec'][site_name]['X'])) - shift, cumvel, '--', label='rec')
+        ax[row, col].set_xticks([], [])
+        ax[row, col].set_yticks([], [])
+        ax[row, col].set_title(syn_sites[j][:], fontsize=8)
 
-        ax[i].set_ylabel(f'V{comp[i]} (m/s)')
-        ax[i].set_xlim(shift, 50)
-    ax[-1].set_xlabel('Time (s)')
-    ax[0].legend()
+    image = []
     fig.canvas.draw()
     if backend == "inline":
         temp = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
         image += [temp.reshape(fig.canvas.get_width_height()[::-1] + (3,))]
-                             
+                            
     return image if backend == "inline" else [fig]
 
 
