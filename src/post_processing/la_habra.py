@@ -6,6 +6,8 @@ A few subroutines to be used for post-processing
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+from matplotlib.colors import PowerNorm
+from matplotlib.colors import LogNorm
 import struct
 import imageio
 import collections
@@ -248,29 +250,26 @@ def pick_vel(mx=0, my=0, models=[], syn_sites={}):
     return {k: vel_syn[k] for k in models}
 
 
-def pick_psa(mx, my, models, osc_freqs=np.logspace(-1, 1, 91), osc_damping=0.05, syn_sites={}):
+def pick_psa(mx=0, my=0, models=[], osc_freqs=np.logspace(-1, 1, 91), osc_damping=0.05, syn_sites={}):
     '''Import psa response if available
     If psa pickle files don't exist, create them.
     If some other models are queried, compute them and append to psa files.
     '''
 
     try: 
-        with open('results/psa_rec.pickle', 'rb') as fid:
-            rotd_rec = pickle.load(fid)
         with open('results/psa_syn.pickle', 'rb') as fid:
-            rotd_syn = pickle.load(fid)
+            psa_syn = pickle.load(fid)
     except Exception as e:
-        rotd_rec = dict()
-        rotd_syn = collections.defaultdict(dict)
+        psa_syn = collections.defaultdict(dict)
     
-    if all(x in rotd_syn.keys() for x in models):
+    if all(x in psa_syn.keys() for x in models):
         print("Models queried!")
-        return rotd_rec, {k:rotd_syn[k] for k in models}
+        return {k:psa_syn[k] for k in models} if models else psa_syn
     
     # Remove existing models except extra model queried
-    init_len = len(rotd_syn)
+    init_len = len(psa_syn)
     _models = models.copy()   
-    for key in rotd_syn.keys():
+    for key in psa_syn.keys():
         if key in _models:
             _models.remove(key)
     vel_syn = pick_vel(mx, my, models.copy(), syn_sites)
@@ -278,35 +277,23 @@ def pick_psa(mx, my, models, osc_freqs=np.logspace(-1, 1, 91), osc_damping=0.05,
     for isite in range(len(syn_sites)):
         print(f"\rComputing site {isite} / {len(syn_sites)}", end="\r", flush=True)
         site_name = syn_sites[isite][0]
-        if site_name not in rotd_rec:
-            print(f"\nGathering rotd_rec for {site_name}\n")
-            # If site not found on the server
-            if not vel_syn['rec'][site_name]:
-                continue
-            accx, accy = (np.diff(x, prepend=0) / vel_rec[site_name]['dt'] \
-                          for x in [vel_rec[site_name]['X'], vel_rec[site_name]['Y']])
-            rotd_rec[site_name] = my_pyrotd.my_calc_rotated_spec_accels(
-                vel_rec[site_name]['dt'], accx, accy,
-                osc_freqs, osc_damping, percentiles=[50])
 
         for model in _models:
-            if model not in rotd_syn.keys():
-                rotd_syn[model] = dict()
-            print(f"\rGathering rotd_syn for {site_name} of {model}", end='\r', flush=True)
+            if model not in psa_syn.keys():
+                psa_syn[model] = dict()
+            print(f"\rGathering psa_syn for {site_name} of {model}", end='\r', flush=True)
             accx, accy = (np.diff(x, prepend=0) / vel_syn[model][site_name]['dt'] \
                           for x in [vel_syn[model][site_name]['X'], vel_syn[model][site_name]['Y']])
-            rotd_syn[model][site_name] = my_pyrotd.my_calc_rotated_spec_accels(
+            psa_syn[model][site_name] = my_pyrotd.my_calc_rotated_spec_accels(
                 vel_syn[model][site_name]['dt'], accx, accy,
                 osc_freqs, osc_damping, percentiles=[50])
     
     # Rewrite if more models queried than existing
-    if len(rotd_syn) > init_len:
-        with open('results/psa_rec.pickle', 'wb') as fid:
-            pickle.dump(rotd_rec, fid, protocol=pickle.HIGHEST_PROTOCOL)
+    if len(psa_syn) > init_len:
         with open('results/psa_syn.pickle', 'wb') as fid:
-            pickle.dump(rotd_syn, fid, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(psa_syn, fid, protocol=pickle.HIGHEST_PROTOCOL)
             
-    return rotd_rec, {k:rotd_syn[k] for k in models}
+    return {k:psa_syn[k] for k in models}
 
 
 def plot_snapshot(it, mx, my, model="", case="", draw=False, backend="inline"):   
@@ -331,14 +318,12 @@ def plot_snapshot(it, mx, my, model="", case="", draw=False, backend="inline"):
 def plot_validation(site_name, models, lowcut=0.15, highcut=5, metrics=['vel', 'pas'], syn_sites={}, backend="inline", plot_rec=True):
     '''Plot comparison among multiple models
     '''
-    with open('results/vel_syn.pickle', 'rb') as fid:
-        vel_syn = pickle.load(fid)
+    vel_syn = pick_vel()
     print(models)
-    vel_rec = vel_syn['rec']
-    if not vel_rec[site_name]:
+    if not vel_syn['rec'][site_name]:
         return None
-    dt_rec = vel_rec[site_name]['dt']   
-    len_rec = len(vel_rec[site_name]['X'])
+    dt_rec = vel_syn['rec'][site_name]['dt']   
+    len_rec = len(vel_syn['rec'][site_name]['X'])
     t_rec = np.arange(len_rec) * dt_rec
     comp = {0: "X", 1: "Y", 2: "Z"}
     image =[]
@@ -348,14 +333,20 @@ def plot_validation(site_name, models, lowcut=0.15, highcut=5, metrics=['vel', '
         fig.suptitle(f'{site_name}')
         for i in range(3):   
             if plot_rec:
-                vel = filt_B(vel_rec[site_name][comp[i]], 1 / dt_rec, lowcut=lowcut, highcut=highcut, causal=False)
+                if highcut:
+                    vel = filt_B(vel_syn['rec'][site_name][comp[i]], 1 / dt_rec, lowcut=lowcut, highcut=highcut, causal=False)
+                else:
+                    vel = vel_syn['rec'][site_name][comp[i]]
                 ax[i].plot(t_rec, vel, label='rec')
             for model in models:
                 dt_syn = vel_syn[model][site_name]['dt']
                 len_syn = len(vel_syn[model][site_name][comp[i]])
                 shift = vel_syn['rec'][site_name]['shift']
                 t_syn = np.arange(len_syn) * dt_syn + shift
-                vel = filt_B(vel_syn[model][site_name][comp[i]], 1 / dt_syn, lowcut=lowcut, highcut=highcut, causal=False)
+                if highcut:
+                    vel = filt_B(vel_syn[model][site_name][comp[i]], 1 / dt_syn, lowcut=lowcut, highcut=highcut, causal=False)
+                else:
+                    vel = vel_syn[model][site_name][comp[i]]
                 ax[i].plot(t_syn, vel, lw=0.8, label=model + f", Max = {np.max(vel):.4f}")
 
             ax[i].set_ylabel(f'V{comp[i]} (m/s)')
@@ -363,16 +354,15 @@ def plot_validation(site_name, models, lowcut=0.15, highcut=5, metrics=['vel', '
         ax[-1].set_xlabel('Time (s)')
         ax[0].legend(loc=1)
         fig.canvas.draw()
-        if backend == "inline":
-            temp = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
-            image += [temp.reshape(fig.canvas.get_width_height()[::-1] + (3,))]
-    
+        image += [fig]
+
     if 'psa' in metrics:
+        psa_vel = pick_psa()
         fig2, ax = plt.subplots(dpi=400)
         fig2.tight_layout()
         fig2.suptitle(f'{site_name}') 
         if plot_rec:
-            psa = psa_rec[site_name]
+            psa = psa_syn['rec'][site_name]
             ax.plot(psa.osc_freq, psa.spec_accel, label='rec')
         for model in models:
             psa = psa_syn[model][site_name]
@@ -383,11 +373,8 @@ def plot_validation(site_name, models, lowcut=0.15, highcut=5, metrics=['vel', '
         ax.set_xlabel('Frequency (Hz)')
         ax.legend()
         fig2.canvas.draw()
-        if backend == "inline":
-            temp = np.frombuffer(fig2.canvas.tostring_rgb(), dtype='uint8')
-            image += [temp.reshape(fig2.canvas.get_width_height()[::-1] + (3,))]
-                             
-    return image if backend == "inline" else [fig, fig2]
+        image += [fig2]                     
+    return image
 
 
 def comp_cum_energy(vel, dt=0.01, lowcut=0.15, highcut=5):
@@ -408,27 +395,26 @@ def comp_cum_energy(vel, dt=0.01, lowcut=0.15, highcut=5):
     return np.cumsum(vel ** 2) * dt
 
 
-def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, syn_sites={}, backend="inline", seed=None, plot_rec=True):
+def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, syn_sites={}, seed=None, plot_rec=True, save=False, sfile=""):
     '''Plot cumulative energy time histories
     '''
     vel_syn = pick_vel()
     fig, ax= plt.subplots(nrow, ncol, dpi=200)
     fig.tight_layout()
-    if seed:
+    if seed is not None:
         np.random.seed(seed)
     nsites = np.random.rand(len(syn_sites)).argsort()
-    print(nsites)
+    # print(nsites)
     i = -1
     for j in nsites:
         site_name = syn_sites[j][0]
-        print(syn_sites[j][:])
         i += 1
         if i > nrow * ncol - 1:
             break
         row, col = i // ncol, i % ncol
         if col == ncol - 1:
             if row == nrow - 2:
-                ax[row, col].legend(*ax[0][0].get_legend_handles_labels(), loc='upper left', bbox_to_anchor=(-0.25, 1.5))
+                ax[row, col].legend(*ax[0][0].get_legend_handles_labels(), loc='upper left', bbox_to_anchor=(-0.1, 1.2), bbox_transform=ax[row, col].transAxes)
                 ax[row, col].set_frame_on(False)
                 ax[row, col].set_xticks([], [])
                 ax[row, col].set_yticks([], [])
@@ -448,15 +434,167 @@ def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, syn_sites={}
         ax[row, col].set_xticks([], [])
         ax[row, col].set_yticks([], [])
         ax[row, col].set_title(syn_sites[j][:], fontsize=8)
-
-    image = []
-    fig.canvas.draw()
-    if backend == "inline":
-        temp = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
-        image += [temp.reshape(fig.canvas.get_width_height()[::-1] + (3,))]
+    if save:
+        saveto = sfile if sfile else f'cum_vel_{models[0]}_{highcut:.1f}hz'
+        fig.savefig(f"results/{saveto}.svg", dpi=400, bbox_inches='tight', pad_inches=0.05)
+    return fig
                             
-    return image if backend == "inline" else [fig]
 
 
+def plot_metric_map(mx, my, models, f=1, metric='pgv', vmax = 1e6, topography=None, nd=250, step=5, sx=2686, sy=1789, syn_sites={}, save=False, sfile=""):
+    sx, sy = (sx - nd) // step, (sy - nd) // step
+    val = collections.defaultdict()
+    fig, ax = plt.subplots((len(models) - 1) // 2 + 1, 2, dpi=200)
+    plt.suptitle(f'{metric} at {f} Hz', y=1.05)
+    fig.tight_layout()
+    plt.subplots_adjust(left=0.15, right=0.85, wspace=-0.1, hspace=0.6)
+    for i, model in enumerate(models):
+        val[model] = np.fromfile(f'{model}/{metric}_{f:05.2f}Hz.bin', dtype='f').reshape(my, mx)
+        # TODO
+        # Compute these metrics at each site
+        vmax = min(vmax, 0.85 *  np.max(val[models[0]]))
+        vmin = np.min(val[models[0]])
+        im = ax[i // 2, i % 2].imshow(val[model][nd:-nd:step, nd:-nd:step].T, cmap='bwr', vmin=vmin, vmax=vmax)
+        ax[i // 2, i % 2].contour(topography[nd:-nd:step, nd:-nd:step].T, 5, cmap='cividis', linewidths=0.5)
+        ax[i // 2, i % 2].scatter(sx, sy, 50, color='g', marker='*')
+        cbar = plt.colorbar(im, ax=ax[i // 2, i % 2], ticks=np.linspace(vmin, vmax, 5))
+        ax[i // 2, i % 2].set_title(model, y=1.05)
+    if i % 2 == 0:
+        fig.delaxes(ax[-1, -1])
+    if save:
+        saveto = sfile if sfile else f'{metric}_{models[0]}_{f:.1f}hz'
+        fig.savefig(f"results/{saveto}.svg", dpi=400, bbox_inches='tight', pad_inches=0.05)
+    return fig
+
+
+def plot_diff_map(mx, my, models, f=1, metric='pgv', vmax=2, topography=None, nd=250, step=5, sx=2686, sy=1789, save=False, sfile=""):
+    '''plot difference map and histogram
+    Input
+    -----
+    models : list
+        Currently "noqf_orig" is necessary
+    f : float or int
+        Frequency to plot with
+    metric : {'pgv', 'dur', 'arias', 'gmrotD50'}
+    nd : int
+        Absorbing layers
+    '''
+    if "noqf_orig" not in models:
+        print('Model "noqf_orig" is needed')
+        return None
+    sx, sy = (sx - nd) // step, (sy - nd) // step
+    val = collections.defaultdict()
+    for model in models:
+        val[model] = np.fromfile(f'{model}/{metric}_{f:05.2f}Hz.bin', dtype='f').reshape(my, mx)
+
+    val_dif = np.divide(sum(val[model] for model in models if model != "noqf_orig") / (len(models) - 1) - val['noqf_orig'], val['noqf_orig'], out=np.zeros_like(val[model]), where=val['noqf_orig'] != 0)
+    val_dif = val_dif[nd:-nd:5, nd:-nd:5]
+    val_dif[np.isnan(val_dif)] = 0
+    val_dif[np.isinf(val_dif)] = 0
+    vmax = min(vmax, 0.8 * np.max(val_dif))
+    vmin = np.min(val_dif)
+    print(np.max(val_dif), vmin)
+
+    fig, ax = plt.subplots(1, 2, dpi=200)
+    fig.tight_layout()
+    im = ax[0].imshow(val_dif.T, cmap='bwr', vmax=vmax)
+    cbar = plt.colorbar(im, ax=ax[0], orientation='horizontal', ticks=np.linspace(vmin, vmax, 5))
+    cbar.ax.set_xlabel('Normalized Difference')
+    CS = ax[0].contour(topography[nd:-nd:5, nd:-nd:5].T, [0, 50, 100, 150, 250, 400], cmap='cividis', linewidths=0.8)
+    ax[0].clabel(CS, fmt='%d', inline=True, fontsize=8)
+    ax[0].scatter(sx, sy, 150, color='g', marker='*')
+    ax[1].hist(np.ravel(val_dif), bins=10, range=(np.min(val_dif), vmax), density=True)
+    ax[1].locator_params(nbins=5, axis='x')
+    plt.suptitle(f'Median difference of {metric} at {f} Hz = {100 * np.median(val_dif):.3f} %', y=1.05)
+    if save:
+        saveto = sfile if sfile else f'cum_vel_{models[0]}_{f:.1f}hz'
+        fig.savefig(f"results/{saveto}.svg", dpi=400, bbox_inches='tight', pad_inches=0.05)
+                            
+    return fig, val_dif
+
+
+def plot_diff_hist(mx, my, models, fs=[1, 5], metric='pgv', vmax=2, topography=None, nd=250, step=5, sx=2686, sy=1789, save=False, sfile=""):
+    '''plot difference map and histogram
+    Input
+    -----
+    mx, my : size of domain
+    models : list
+        Currently "noqf_orig" is necessary
+    fs : list of float or int
+        Frequencies to compare with
+    metric : {'pgv', 'dur', 'arias', 'gmrotD50'}
+    nd : int
+        Absorbing layers
+    '''
+    if "noqf_orig" not in models:
+        print('Model "noqf_orig" is needed')
+        return None
+    if len(fs) != 2:
+        print('Accept TWO frequencies only!')
+        return None
+
+    sx, sy = (sx - nd) // step, (sy - nd) // step
+    fs.sort()
+    val = collections.defaultdict(dict)
+    val_dif = collections.defaultdict()
+    for f in fs:
+        for model in models:
+            val[f][model] = np.fromfile(f'{model}/{metric}_{f:05.2f}Hz.bin', dtype='f').reshape(my, mx)
+        val_dif[f] = np.divide(sum(val[f][model] for model in models if model != "noqf_orig") / (len(models) - 1) - val[f]['noqf_orig'], val[f]['noqf_orig'], out=np.zeros_like(val[f][model]), where=val[f]['noqf_orig'] != 0)
+        val_dif[f] = val_dif[f][nd:-nd:step, nd:-nd:step]
+        val_dif[f][np.isnan(val_dif[f])] = 0
+        val_dif[f][np.isinf(val_dif[f])] = 0
+        print(f"At {f:.1f} Hz: Max = {np.max(val_dif[f]):.2f}, Min = {np.min(val_dif[f]):.2f}")
+
+    vmax = min(vmax, 0.8 * np.max(val_dif[fs[1]]))
+    vmin = np.min(val_dif[fs[0]])
+    fig, ax = plt.subplots(2, 2, dpi=300)
+    fig.tight_layout()
+    fig.subplots_adjust(hspace=0.4, wspace=0.4)
+    for i, f in enumerate(fs):
+        im = ax[0, i].imshow(val_dif[f].T, cmap='bwr', vmin=vmin, vmax=vmax)
+        cbar = plt.colorbar(im, ax=ax[0, i], orientation='vertical', ticks=np.linspace(vmin, vmax, 5))
+        cbar.ax.set_ylabel('Normalized Difference')
+        CS = ax[0, i].contour(topography[nd:-nd:step, nd:-nd:step].T, [0, 50, 100, 150, 250, 400], cmap='cividis', linewidths=0.8)
+        ax[0, i].clabel(CS, fmt='%d', inline=True, fontsize=8)
+        ax[0, i].scatter(sx, sy, 150, color='g', marker='*')
+        ax[0, i].set_title(f'Median difference = {100 * np.median(val_dif[f]):.3f}%, f = {f:.1f}Hz', y=1.05)
+
+    im = ax[1, 0].imshow(val_dif[fs[1]].T - val_dif[fs[0]].T, cmap='bwr', vmin=vmin, vmax=vmax)
+    cbar = plt.colorbar(im, ax=ax[1, 0], orientation='vertical', ticks=np.linspace(vmin, vmax, 5))
+    ax[1, 0].set_title(f'{fs[1]:.1f}Hz - {fs[0]:.1f}Hz', y=1.05)
+    CS = ax[1, 0].contour(topography[nd:-nd:step, nd:-nd:step].T, [0, 50, 100, 150, 250, 400], cmap='cividis', linewidths=0.8)
+    ax[1, 0].clabel(CS, fmt='%d', inline=True, fontsize=8)
+    ax[1, 0].scatter(sx, sy, 150, color='g', marker='*')
+
+    bins = np.linspace(vmin, vmax, 12)
+    ax[1, 1].hist([np.ravel(val_dif[f]) for f in fs], bins, label=[f'{f:.1f}Hz' for f in fs], density=True)
+    ax[1, 1].set_xlabel('Normalized difference')
+    ax[1, 1].set_ylabel('Count density')
+    ax[1, 1].yaxis.tick_right()
+    ax[1, 1].yaxis.set_label_position("right")
+    ax[1, 1].legend(loc=1)
+    if save:
+        fstring = "_".join(f'{f:.1f} for f in fs')
+        saveto = sfile if sfile else f'diff_hist_{models[0]}_{fstring}hz'
+        fig.savefig(f"results/{saveto}.svg", dpi=400, bbox_inches='tight', pad_inches=0.05)
+
+    fig2, ax = plt.subplots(1, 2, dpi=200)
+    im1 = ax[0].imshow(topography[nd : -nd : step, nd : -nd : step].T, cmap='terrain', norm=PowerNorm(gamma=0.6))
+    ax[0].set_title('Topography', y=1.05)
+    cbar1 = plt.colorbar(im1, ax=ax[0], orientation='horizontal')
+    cbar1.ax.set_xlabel('Elevation (m)')
+    cbar1.set_ticks([0, 50, 100, 200, 400])
+    # There is a bug with matplotlib using locator_params on colorbar.ax
+    # https://github.com/matplotlib/matplotlib/issues/11937
+    # cbar1.set_ticks(np.linspace(np.min(topography), np.max(topography), 6))
+    im2 = ax[1].imshow(val_dif[fs[1]].T - val_dif[fs[0]].T, cmap='bwr', vmax=2)
+    ax[1].set_title(f'Normalized difference ({fs[1]}Hz - {fs[0]}Hz)', y=1.05)
+    cbar2 = plt.colorbar(im2, ax=ax[1], orientation='horizontal')
+    if save:
+        fig2.savefig(f"results/{saveto}_2.svg", dpi=400, bbox_inches='tight', pad_inches=0.05)
+
+    return [fig, fig2], val_dif
+                            
 if __name__ == "__main__":
     print("Leave it so.")
