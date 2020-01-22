@@ -414,14 +414,13 @@ def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, syn_sites={}
     vel_syn = pick_vel()
     fig, ax= plt.subplots(nrow, ncol, dpi=200)
     fig.tight_layout()
-    if seed:
+    if seed is not None:
         np.random.seed(seed)
     nsites = np.random.rand(len(syn_sites)).argsort()
-    print(nsites)
+    # print(nsites)
     i = -1
     for j in nsites:
         site_name = syn_sites[j][0]
-        print(syn_sites[j][:])
         i += 1
         if i > nrow * ncol - 1:
             break
@@ -456,6 +455,69 @@ def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, syn_sites={}
         image += [temp.reshape(fig.canvas.get_width_height()[::-1] + (3,))]
                             
     return image if backend == "inline" else [fig]
+
+
+def plot_metric_map(models, mx, my, f=1, metric='pgv', topography=None, nd=250, syn_sites={}):
+    val = collections.defaultdict()
+    fig, ax = plt.subplots((len(models) - 1) // 2 + 1, 2, dpi=200)
+    plt.suptitle(f'{metric} at {f} Hz', y=1.05)
+    fig.tight_layout()
+    plt.subplots_adjust(left=0.15, right=0.85, wspace=-0.1, hspace=0.6)
+    for i, model in enumerate(models):
+        val[model] = np.fromfile(f'{model}/{metric}_{f:05.2f}Hz.bin', dtype='f').reshape(my, mx)
+        # TODO
+        # Compute these metrics at each site
+        im = ax[i // 2, i % 2].imshow(val[model][nd:-nd:5, nd:-nd:5].T, cmap='bwr', vmin=0, vmax=0.85 * np.max(val[models[0]]))
+        ax[i // 2, i % 2].contour(topography[nd:-nd:5, nd:-nd:5].T, 5, cmap='cividis', linewidths=0.5)
+        cbar = plt.colorbar(im, ax=ax[i // 2, i % 2])
+        cbar.ax.locator_params(nbins=5)
+        ax[i // 2, i % 2].set_title(model, y=1.05)
+    if i % 2 == 0:
+        fig.delaxes(ax[-1, -1])
+    fig.canvas.draw()
+
+
+def plot_diff_map(models, mx, my, f=1, metric='pgv', vmax=2, topography=None, nd=250):
+    '''plot difference map and histogram
+    Input
+    -----
+    models : list
+        Currently "noqf_orig" is necessary
+    f : float or int
+        Frequency to plot with
+    metric : {'pgv', 'dur', 'arias', 'gmrotD50'}
+    nd : int
+        Absorbing layers
+    '''
+    if "noqf_orig" not in models:
+        print('Model "noqf_orig" is needed')
+        return None
+    val = collections.defaultdict()
+    for model in models:
+        val[model] = np.fromfile(f'{model}/{metric}_{f:05.2f}Hz.bin', dtype='f').reshape(my, mx)
+
+    val_dif = np.divide(sum(val[model] for model in models if model != "noqf_orig") / (len(models) - 1) - val['noqf_orig'], val['noqf_orig'], out=np.zeros_like(val[model]), where=val['noqf_orig'] != 0)
+    val_dif = val_dif[nd:-nd:5, nd:-nd:5]
+    val_dif[np.isnan(val_dif)] = 0
+    val_dif[np.isinf(val_dif)] = 0
+    vmax = min(vmax, 0.8 * np.max(val_dif))
+    vmin = np.min(val_dif)
+    print(np.max(val_dif), vmin)
+
+    fig, ax = plt.subplots(1, 2, dpi=200)
+    fig.tight_layout()
+    im = ax[0].imshow(val_dif, cmap='bwr', vmax=vmax)
+    cbar = plt.colorbar(im, ax=ax[0], orientation='horizontal', ticks=np.linspace(vmin, vmax, 5))
+    cbar.ax.set_xlabel('Difference (100%)')
+    ax[0].contour(topography[nd:-nd:5, nd:-nd:5].T, 8, cmap='cividis', linewidths=0.8)
+    ax[1].hist(np.ravel(val_dif), bins=10, range=(np.min(val_dif), vmax), density=True)
+    ax[1].locator_params(nbins=5)
+    plt.suptitle(f'Median difference of {metric} at {f} Hz = {100 * np.median(val_dif):.3f} %', y=1.05)
+    fig.canvas.draw()
+    temp = np.frombuffer(fig.canvas.tostring_rgb(), dtype='uint8')
+    image = [temp.reshape(fig.canvas.get_width_height()[::-1] + (3,))]
+                            
+    return image, val_dif
 
 
 if __name__ == "__main__":
