@@ -357,7 +357,7 @@ def plot_validation(site_name, models, lowcut=0.15, highcut=5, metrics=['vel', '
         image += [fig]
 
     if 'psa' in metrics:
-        psa_vel = pick_psa()
+        psa_syn = pick_psa()
         fig2, ax = plt.subplots(dpi=400)
         fig2.tight_layout()
         fig2.suptitle(f'{site_name}') 
