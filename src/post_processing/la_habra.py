@@ -330,14 +330,14 @@ def plot_validation(site_name, models, lowcut=0.15, highcut=5, metrics=['vel', '
     if 'vel' in metrics:
         fig, ax = plt.subplots(3, 1, dpi=400)
         fig.tight_layout()
-        fig.suptitle(f'{site_name}')
+        fig.suptitle(f'{site_name}', y=1.05)
         for i in range(3):   
             if plot_rec:
                 if highcut:
                     vel = filt_B(vel_syn['rec'][site_name][comp[i]], 1 / dt_rec, lowcut=lowcut, highcut=highcut, causal=False)
                 else:
                     vel = vel_syn['rec'][site_name][comp[i]]
-                ax[i].plot(t_rec, vel, label='rec')
+                ax[i].plot(t_rec, vel, label='rec, ' + f'Max = {np.max(vel):.4f}')
             for model in models:
                 dt_syn = vel_syn[model][site_name]['dt']
                 len_syn = len(vel_syn[model][site_name][comp[i]])
@@ -353,14 +353,13 @@ def plot_validation(site_name, models, lowcut=0.15, highcut=5, metrics=['vel', '
             ax[i].set_xlim(shift + 2, shift + 30)
         ax[-1].set_xlabel('Time (s)')
         ax[0].legend(loc=1)
-        fig.canvas.draw()
         image += [fig]
 
     if 'psa' in metrics:
         psa_syn = pick_psa()
         fig2, ax = plt.subplots(dpi=400)
         fig2.tight_layout()
-        fig2.suptitle(f'{site_name}') 
+        fig2.suptitle(f'{site_name}', y=1.05) 
         if plot_rec:
             psa = psa_syn['rec'][site_name]
             ax.plot(psa.osc_freq, psa.spec_accel, label='rec')
@@ -372,9 +371,98 @@ def plot_validation(site_name, models, lowcut=0.15, highcut=5, metrics=['vel', '
         ax.yaxis.grid(True, which='both')
         ax.set_xlabel('Frequency (Hz)')
         ax.legend()
-        fig2.canvas.draw()
         image += [fig2]                     
     return image
+
+
+def plot_syn_freqs(site_name, models, freqs=[1,5], comp='Z', plot_rec=False, save=False, sfile=""):
+    '''
+    Plot comparison between synthetics and their psa if required, similar to plot_validation
+    Input
+    -----
+    site_name : string
+    models : list
+             At most two models accepted
+    freqs : list
+            Frequencies to look at
+    comp : {'X', 'Y', 'Z'}
+        The component of velocities
+    plot_rec : boolean
+        Plot recordings if True
+    save : boolean
+    sfile : string
+        The name of file to save when "save" is True
+    '''
+    vel_syn = pick_vel()
+    psa_syn = pick_psa()
+    nm = len(models)
+    nf = len(freqs)
+    vmax = 0
+    for model in models:
+        vmax = max(vmax, np.max(vel_syn[model][site_name][comp])) * 1.5
+
+    fig, ax = plt.subplots(2, 1, dpi=400)
+    ax2 = ax[-1].twinx()
+    for i, model in enumerate(models):
+        for j, f in enumerate(freqs):
+            vel = vel_syn[model][site_name]
+            psa = psa_syn[model][site_name]
+            fvel = filt_B(vel[comp], 1 / vel['dt'], highcut=f)
+            if i == 0:
+                ax[0].plot(np.arange(len(vel[comp])) * vel['dt'], fvel + vmax * j, # (j * nm + i)
+                           'k', lw=1.2, label=f'{model}, {f:.1f}Hz')
+                valign = 'bottom'
+            else:
+                ax[0].plot(np.arange(len(vel[comp])) * vel['dt'], fvel + vmax * j, # (j * nm + i)
+                           'r-.', lw=1.2, label=f'{model}, {f:.1f}Hz')
+                valign = 'top'
+            color = ax[0].get_lines()[-1].get_c()
+            ax[0].annotate(f'{np.max(np.abs(fvel)):.4f}', (0, fvel[0] + vmax * j), xytext=(3, 2 if i == 0 else -3),
+                textcoords="offset points", ha='left', va=valign, color=color)
+
+        # Plot psa time histories
+        ax[-1].plot(psa.osc_freq, psa.spec_accel, label=f'{model}')
+        # if plot_rec, plot psa ratio against data, otherwise between models
+        if plot_rec:
+            color = ax[-1].get_lines()[-1].get_c()
+            ax2.plot(psa.osc_freq, np.divide(psa_syn[model][site_name].spec_accel,
+                                             psa_syn['rec'][site_name].spec_accel),
+                     color=color, ls=':', lw=0.8, label=f'{model} / data')
+        elif len(models) > 1:
+            ax2.plot(psa.osc_freq, np.divide(psa_syn[models[0]][site_name].spec_accel,
+                                             psa_syn[models[1]][site_name].spec_accel),
+                     'k:', lw=0.8, label=f'{models[0]} / {models[1]}')
+
+    # Plot data time histories if plot_rec == True
+    if plot_rec:
+        for j, f in enumerate(freqs):
+            vel = vel_syn['rec'][site_name]
+            fvel = filt_B(vel[comp], 1 / vel['dt'], highcut=f)
+            ax[0].plot(np.arange(len(vel[comp])) * vel['dt'] - vel['shift'], fvel + vmax * nm, #(nm * nf + j),
+                       lw=1.2, color='b' if j == 0 else 'g', label=f'data, {f:.1f}Hz')
+            color = ax[0].get_lines()[-1].get_c()
+            valign = 'bottom' if j == 0 else 'top'
+            ax[0].annotate(f'{np.max(np.abs(fvel)):.4f}', (0, fvel[0] + vmax * nf), xytext=(3, 2 if j == 0 else -3),
+                             textcoords="offset points", ha='left', va=valign, color=color)
+        psa = psa_syn['rec'][site_name]
+        ax[-1].plot(psa.osc_freq, psa.spec_accel, 'k', label=f'data')
+
+    # Adjust figure aesthetics
+    ax[0].set(xlabel='Time (s)', ylabel=f'V{comp} (m/s)', xlim=[0, 25], yticklabels=[])
+    ax[0].legend(bbox_to_anchor=(0., 1.02, 1., .102), loc='lower left',
+                 ncol=2, mode="expand", borderaxespad=0)
+    ax[-1].set(xlabel='Frequency (Hz)', ylabel=f'$SA (m/s^2)$', xlim=[0, 5])
+    ax2.set_ylabel('Ratio')
+    ax[-1].xaxis.grid(True, which='both')
+    ax[-1].yaxis.grid(True, which='both')
+    ax2.yaxis.grid(True, which='major', color='gray', ls='--')
+    ax[-1].legend(bbox_to_anchor=(0., 1.02, 1., .102), loc='lower left',
+                  ncol=2, mode="expand", borderaxespad=0)
+    fig.tight_layout()
+    if save:
+        saveto = sfile if sfile else f'syn_freqs_{models[0]}_{freqs[0]:.1f}hz'
+        fig.savefig(f"results/{saveto}.svg", dpi=400, bbox_inches='tight', pad_inches=0.05)
+    return fig
 
 
 def comp_cum_energy(vel, dt=0.01, lowcut=0.15, highcut=5):
@@ -395,7 +483,7 @@ def comp_cum_energy(vel, dt=0.01, lowcut=0.15, highcut=5):
     return np.cumsum(vel ** 2) * dt
 
 
-def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, syn_sites={}, seed=None, plot_rec=True, save=False, sfile=""):
+def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, my=3456, dh=0.008, syn_sites={}, seed=None, plot_rec=True, save=False, sfile=""):
     '''Plot cumulative energy time histories
     '''
     vel_syn = pick_vel()
@@ -433,7 +521,7 @@ def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, syn_sites={}
         ax[row, col].plot(vel_syn['rec'][site_name]['dt'] * np.arange(len(vel_syn['rec'][site_name]['X'])) - shift, cumvel, '--', label='rec')
         ax[row, col].set_xticks([], [])
         ax[row, col].set_yticks([], [])
-        ax[row, col].set_title(syn_sites[j][:], fontsize=8)
+        ax[row, col].set_title(f'{syn_sites[j][0]}, x={syn_sites[j][2] * dh:.2f}, y={(my - syn_sites[j][1]) * dh:.2f}', fontsize=8)
     if save:
         saveto = sfile if sfile else f'cum_vel_{models[0]}_{highcut:.1f}hz'
         fig.savefig(f"results/{saveto}.svg", dpi=400, bbox_inches='tight', pad_inches=0.05)
@@ -456,7 +544,7 @@ def plot_metric_map(mx, my, models, f=1, metric='pgv', vmax = 1e6, topography=No
         vmin = np.min(val[models[0]])
         im = ax[i // 2, i % 2].imshow(val[model][nd:-nd:step, nd:-nd:step].T, cmap='bwr', vmin=vmin, vmax=vmax)
         ax[i // 2, i % 2].contour(topography[nd:-nd:step, nd:-nd:step].T, 5, cmap='cividis', linewidths=0.5)
-        ax[i // 2, i % 2].scatter(sx, sy, 50, color='g', marker='*')
+        ax[i // 2, i % 2].scatter(sx, my - sy, 50, color='g', marker='*')
         cbar = plt.colorbar(im, ax=ax[i // 2, i % 2], ticks=np.linspace(vmin, vmax, 5))
         ax[i // 2, i % 2].set_title(model, y=1.05)
     if i % 2 == 0:
@@ -467,12 +555,12 @@ def plot_metric_map(mx, my, models, f=1, metric='pgv', vmax = 1e6, topography=No
     return fig
 
 
-def plot_diff_map(mx, my, models, f=1, metric='pgv', vmax=2, topography=None, nd=250, step=5, sx=2686, sy=1789, save=False, sfile=""):
-    '''plot difference map and histogram
+def plot_diff_map(mx, my, models, f=1, metric='pgv', vmax=2, topography=None, nd=250, step=5, sx=2686, sy=1789, dh=0.008, save=False, sfile=""):
+    '''plot ratio map and histogram
     Input
     -----
     models : list
-        Currently "noqf_orig" is necessary
+        Currently only accept two models
     f : float or int
         Frequency to plot with
     metric : {'pgv', 'dur', 'arias', 'gmrotD50'}
@@ -482,39 +570,35 @@ def plot_diff_map(mx, my, models, f=1, metric='pgv', vmax=2, topography=None, nd
     if "noqf_orig" not in models:
         print('Model "noqf_orig" is needed')
         return None
-    sx, sy = (sx - nd) // step, (sy - nd) // step
+    # sx, sy = (sx - nd) // step, (sy - nd) // step
+    sx, sy = (sx - nd) * dh, (sy - nd) * dh
     val = collections.defaultdict()
     for model in models:
-        val[model] = np.fromfile(f'{model}/{metric}_{f:05.2f}Hz.bin', dtype='f').reshape(my, mx)
+        val[model] = np.fromfile(f'{model}/{metric}_{f:05.2f}Hz.bin', dtype='f').reshape(my, mx)[nd : -nd : step, nd : -nd : step]
 
-    val_dif = np.divide(sum(val[model] for model in models if model != "noqf_orig") / (len(models) - 1) - val['noqf_orig'], val['noqf_orig'], out=np.zeros_like(val[model]), where=val['noqf_orig'] != 0)
-    val_dif = val_dif[nd:-nd:5, nd:-nd:5]
-    val_dif[np.isnan(val_dif)] = 0
-    val_dif[np.isinf(val_dif)] = 0
-    vmax = min(vmax, 0.8 * np.max(val_dif))
-    vmin = np.min(val_dif)
-    print(np.max(val_dif), vmin)
+    vmax = min(vmax, 0.8 * np.max(val[models[0]]), 0.8 * np.max(val[models[1]]))
+    vmin = max(np.min(val[models[0]]), np.min(val[models[1]]))
 
-    fig, ax = plt.subplots(1, 2, dpi=200)
+    fig, ax = plt.subplots((len(models) - 1) // 2 + 1, 2, dpi=200)
     fig.tight_layout()
-    im = ax[0].imshow(val_dif.T, cmap='bwr', vmax=vmax)
-    cbar = plt.colorbar(im, ax=ax[0], orientation='horizontal', ticks=np.linspace(vmin, vmax, 5))
-    cbar.ax.set_xlabel('Normalized Difference')
-    CS = ax[0].contour(topography[nd:-nd:5, nd:-nd:5].T, [0, 50, 100, 150, 250, 400], cmap='cividis', linewidths=0.8)
-    ax[0].clabel(CS, fmt='%d', inline=True, fontsize=8)
-    ax[0].scatter(sx, sy, 150, color='g', marker='*')
-    ax[1].hist(np.ravel(val_dif), bins=10, range=(np.min(val_dif), vmax), density=True)
-    ax[1].locator_params(nbins=5, axis='x')
-    plt.suptitle(f'Median difference of {metric} at {f} Hz = {100 * np.median(val_dif):.3f} %', y=1.05)
+    for i, model in enumerate(models):
+        im = ax[i].imshow(val[model].T, cmap='bwr', vmin=vmin, vmax=vmax, extent=[0, (mx - 2 * nd) * dh, 0, (my - 2 * nd) * dh])
+        cbar = plt.colorbar(im, ax=ax[i], orientation='horizontal', ticks=np.linspace(vmin, vmax, 5))
+        cbar.ax.set_xlabel(f'{models[i]}')
+        CS = ax[i].contour(np.arange(0, mx - 2 * nd, step) * dh, np.arange(my - 2 * nd, 0, -step) * dh, topography[nd:-nd:step, nd:-nd:step].T, [0, 50, 100, 150, 250, 400], cmap='cividis', linewidths=0.8)
+        ax[i].clabel(CS, fmt='%d', inline=True, fontsize=8)
+        ax[i].scatter(sx, sy, 200, color='g', marker='*')
+        ax[i].set_title(f'Max = {np.max(val[model]):.2f}; Min = {np.min(val[model]):.2f}', y=1.04)
+    plt.suptitle(f'Comparison of {metric} at {f} Hz', y=1.05)
     if save:
         saveto = sfile if sfile else f'cum_vel_{models[0]}_{f:.1f}hz'
         fig.savefig(f"results/{saveto}.svg", dpi=400, bbox_inches='tight', pad_inches=0.05)
                             
-    return fig, val_dif
+    return fig
 
 
 def plot_diff_hist(mx, my, models, fs=[1, 5], metric='pgv', vmax=2, topography=None, nd=250, step=5, sx=2686, sy=1789, save=False, sfile=""):
-    '''plot difference map and histogram
+    '''plot ratio map and histogram
     Input
     -----
     mx, my : size of domain
@@ -540,7 +624,7 @@ def plot_diff_hist(mx, my, models, fs=[1, 5], metric='pgv', vmax=2, topography=N
     for f in fs:
         for model in models:
             val[f][model] = np.fromfile(f'{model}/{metric}_{f:05.2f}Hz.bin', dtype='f').reshape(my, mx)
-        val_dif[f] = np.divide(sum(val[f][model] for model in models if model != "noqf_orig") / (len(models) - 1) - val[f]['noqf_orig'], val[f]['noqf_orig'], out=np.zeros_like(val[f][model]), where=val[f]['noqf_orig'] != 0)
+        val_dif[f] = np.divide(sum(val[f][model] for model in models if model != "noqf_orig") / (len(models) - 1), val[f]['noqf_orig'], out=np.zeros_like(val[f][model]), where=val[f]['noqf_orig'] != 0)
         val_dif[f] = val_dif[f][nd:-nd:step, nd:-nd:step]
         val_dif[f][np.isnan(val_dif[f])] = 0
         val_dif[f][np.isinf(val_dif[f])] = 0
@@ -548,28 +632,30 @@ def plot_diff_hist(mx, my, models, fs=[1, 5], metric='pgv', vmax=2, topography=N
 
     vmax = min(vmax, 0.8 * np.max(val_dif[fs[1]]))
     vmin = np.min(val_dif[fs[0]])
+    print(vmin, vmax)
     fig, ax = plt.subplots(2, 2, dpi=300)
     fig.tight_layout()
     fig.subplots_adjust(hspace=0.4, wspace=0.4)
     for i, f in enumerate(fs):
         im = ax[0, i].imshow(val_dif[f].T, cmap='bwr', vmin=vmin, vmax=vmax)
         cbar = plt.colorbar(im, ax=ax[0, i], orientation='vertical', ticks=np.linspace(vmin, vmax, 5))
-        cbar.ax.set_ylabel('Normalized Difference')
+        cbar.ax.set_ylabel('Ratio')
         CS = ax[0, i].contour(topography[nd:-nd:step, nd:-nd:step].T, [0, 50, 100, 150, 250, 400], cmap='cividis', linewidths=0.8)
         ax[0, i].clabel(CS, fmt='%d', inline=True, fontsize=8)
-        ax[0, i].scatter(sx, sy, 150, color='g', marker='*')
-        ax[0, i].set_title(f'Median difference = {100 * np.median(val_dif[f]):.3f}%, f = {f:.1f}Hz', y=1.05)
+        ax[0, i].scatter(sx, my //step - sy, 150, color='g', marker='*')
+        ax[0, i].set_title(f'Median ratio = {100 * np.median(val_dif[f]):.3f}%, f = {f:.1f}Hz', y=1.05)
 
-    im = ax[1, 0].imshow(val_dif[fs[1]].T - val_dif[fs[0]].T, cmap='bwr', vmin=vmin, vmax=vmax)
+    val_dif_tmp = np.divide(val_dif[fs[1]], val_dif[fs[0]], out=np.zeros_like(val_dif[fs[0]]), where=val_dif[fs[0]]!=0)
+    im = ax[1, 0].imshow(val_dif_tmp.T, cmap='bwr', vmin=vmin, vmax=vmax)
     cbar = plt.colorbar(im, ax=ax[1, 0], orientation='vertical', ticks=np.linspace(vmin, vmax, 5))
-    ax[1, 0].set_title(f'{fs[1]:.1f}Hz - {fs[0]:.1f}Hz', y=1.05)
+    ax[1, 0].set_title(f'{fs[1]:.1f}Hz / {fs[0]:.1f}Hz', y=1.05)
     CS = ax[1, 0].contour(topography[nd:-nd:step, nd:-nd:step].T, [0, 50, 100, 150, 250, 400], cmap='cividis', linewidths=0.8)
     ax[1, 0].clabel(CS, fmt='%d', inline=True, fontsize=8)
-    ax[1, 0].scatter(sx, sy, 150, color='g', marker='*')
+    ax[1, 0].scatter(sx, my // step - sy, 150, color='g', marker='*')
 
     bins = np.linspace(vmin, vmax, 12)
     ax[1, 1].hist([np.ravel(val_dif[f]) for f in fs], bins, label=[f'{f:.1f}Hz' for f in fs], density=True)
-    ax[1, 1].set_xlabel('Normalized difference')
+    ax[1, 1].set_xlabel('Ratio')
     ax[1, 1].set_ylabel('Count density')
     ax[1, 1].yaxis.tick_right()
     ax[1, 1].yaxis.set_label_position("right")
@@ -589,7 +675,7 @@ def plot_diff_hist(mx, my, models, fs=[1, 5], metric='pgv', vmax=2, topography=N
     # https://github.com/matplotlib/matplotlib/issues/11937
     # cbar1.set_ticks(np.linspace(np.min(topography), np.max(topography), 6))
     im2 = ax[1].imshow(val_dif[fs[1]].T - val_dif[fs[0]].T, cmap='bwr', vmax=2)
-    ax[1].set_title(f'Normalized difference ({fs[1]}Hz - {fs[0]}Hz)', y=1.05)
+    ax[1].set_title(f'Normalized ratio ({fs[1]}Hz - {fs[0]}Hz)', y=1.05)
     cbar2 = plt.colorbar(im2, ax=ax[1], orientation='horizontal')
     if save:
         fig2.savefig(f"results/{saveto}_2.svg", dpi=400, bbox_inches='tight', pad_inches=0.05)
