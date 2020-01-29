@@ -8,13 +8,13 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.colors import PowerNorm
 from matplotlib.colors import LogNorm
+from scipy.special import erfc
 import struct
 import imageio
 import collections
 import pickle
 import re
 import requests
-import pandas as pd
 from pathlib import Path
 from filter_BU import filt_B
 import my_pyrotd
@@ -52,13 +52,12 @@ def filt(vel, dt=1, lowcut=0.15, highcut=5, causal=False):
     '''
     if not issubclass(type(vel), dict):
         return filt_B(vel, 1 / dt, lowcut, highcut, causal=causal) 
-    keys = list(vel.keys())
-    data = dict()
-    if 'dt' in keys:
-        data['dt'] = vel['dt']
-        keys.remove('dt')
-    for comp in keys:
-        data[comp] = filt_B(np.array(vel[comp], dtype='float32'), 1 / vel['dt'], lowcut=lowcut, highcut=highcut, causal=causal)
+    data = {}
+    for comp in vel.keys():
+        if comp in 'XYZ':
+            data[comp] = filt_B(np.array(vel[comp], dtype='float32'), 1 / vel['dt'], lowcut=lowcut, highcut=highcut, causal=causal)
+        else:
+            data[comp] = vel[comp]
     return data
 
 
@@ -260,6 +259,7 @@ def pick_psa(mx=0, my=0, models=[], osc_freqs=np.logspace(-1, 1, 91), osc_dampin
         with open('results/psa_syn.pickle', 'rb') as fid:
             psa_syn = pickle.load(fid)
     except Exception as e:
+        print("Error reading psa_syn: ", e, "\nNew")
         psa_syn = collections.defaultdict(dict)
     
     if all(x in psa_syn.keys() for x in models):
@@ -275,13 +275,12 @@ def pick_psa(mx=0, my=0, models=[], osc_freqs=np.logspace(-1, 1, 91), osc_dampin
     vel_syn = pick_vel(mx, my, models.copy(), syn_sites)
             
     for isite in range(len(syn_sites)):
-        print(f"\rComputing site {isite} / {len(syn_sites)}", end="\r", flush=True)
         site_name = syn_sites[isite][0]
 
         for model in _models:
             if model not in psa_syn.keys():
                 psa_syn[model] = dict()
-            print(f"\rGathering psa_syn for {site_name} of {model}", end='\r', flush=True)
+            print(f"\rGathering psa_syn for {site_name}     of     {model}", end='\r', flush=True)
             accx, accy = (np.diff(x, prepend=0) / vel_syn[model][site_name]['dt'] \
                           for x in [vel_syn[model][site_name]['X'], vel_syn[model][site_name]['Y']])
             psa_syn[model][site_name] = my_pyrotd.my_calc_rotated_spec_accels(
@@ -291,6 +290,7 @@ def pick_psa(mx=0, my=0, models=[], osc_freqs=np.logspace(-1, 1, 91), osc_dampin
     # Rewrite if more models queried than existing
     if len(psa_syn) > init_len:
         with open('results/psa_syn.pickle', 'wb') as fid:
+            print("Appending new models for psa")
             pickle.dump(psa_syn, fid, protocol=pickle.HIGHEST_PROTOCOL)
             
     return {k:psa_syn[k] for k in models}
@@ -400,7 +400,8 @@ def plot_syn_freqs(site_name, models, freqs=[1,5], comp='Z', plot_rec=False, sav
     vmax = 0
     for model in models:
         vmax = max(vmax, np.max(vel_syn[model][site_name][comp])) * 1.5
-
+    if plot_rec:
+        vmax = max(vmax, np.max(vel_syn['rec'][site_name][comp]))
     fig, ax = plt.subplots(2, 1, dpi=400)
     ax2 = ax[-1].twinx()
     for i, model in enumerate(models):
@@ -682,5 +683,103 @@ def plot_diff_hist(mx, my, models, fs=[1, 5], metric='pgv', vmax=2, topography=N
 
     return [fig, fig2], val_dif
                             
+
+def comp_metrics(vel_syn=None, lowcut=0.15, highcut=5, save=False):
+    if not vel_syn:
+        with open('results/vel_syn.pickle', 'rb') as fid:
+            vel_syn = pickle.load(fid)
+    tmax = 30  # Simulation length
+    g = 9.8
+    if type(highcut) != list:
+        highcut = [highcut]
+    metrics = {}
+    for hc in highcut:
+        metrics[hc] = {}
+        print(f'Processing frequency = {hc} Hz')
+        for model in vel_syn:
+            metrics[hc][model] = {}
+            vel = vel_syn[model]
+            for site_name in vel:
+                metrics[hc][model][site_name] = {}
+                if not hc:
+                    v = vel[site_name]
+                else:
+                    v = filt(vel[site_name], lowcut=lowcut, highcut=hc)
+                shift = v.get('shift', 0)
+                dt = v['dt']
+                start, end = int(shift / dt), int((shift + tmax) / dt)
+                vx = v['X'][start : end]
+                vy = v['Y'][start : end]
+                vz = v['Z'][start : end]
+                cx, cy, cz = np.cumsum(vx ** 2), np.cumsum(vy ** 2), np.cumsum(vz ** 2)
+
+                accx = np.diff(vx, prepend=0) ** 2
+                accy = np.diff(vy, prepend=0) ** 2
+                accz = np.diff(vz, prepend=0) ** 2
+
+                x_5, x_75 = np.argwhere(cx >= 0.05 * cx[-1])[0], np.argwhere(cx >= 0.75 * cx[-1])[0]
+                y_5, y_75 = np.argwhere(cy >= 0.05 * cy[-1])[0], np.argwhere(cy >= 0.75 * cy[-1])[0]
+                z_5, z_75 = np.argwhere(cz >= 0.05 * cz[-1])[0], np.argwhere(cz >= 0.75 * cz[-1])[0]
+                metrics[hc][model][site_name]['ener'] = np.sum(vx ** 2 + vy ** 2 + vz ** 2) * dt / 3
+                metrics[hc][model][site_name]['pgv'] = np.sqrt(np.max(vx ** 2 + vy ** 2 + vz ** 2))
+                metrics[hc][model][site_name]['dur'] = (x_75 - x_5 + y_75 - y_5 + z_75 - z_5) * dt / 3
+                metrics[hc][model][site_name]['pga'] = np.sqrt(np.max(accx ** 2 + accy ** 2 + accz ** 2))
+                metrics[hc][model][site_name]['ai'] = np.pi / 2 / g * np.sum(accx ** 2 + accy ** 2 + accz ** 2) * dt / 3
+
+        if save:
+            with open(f'results/metrics.pickle', 'wb') as fid:
+                pickle.dump(metrics, fid, protocol=pickle.HIGHEST_PROTOCOL)
+    return metrics if (not save and type(highcut) != list) else None
+
+def errorf(x, y):
+    return 100 * erfc(2 * abs(x - y) / (x + y))
+
+
+def comp_GOF(mx, my, freqs, models, metrics=['ai', 'dur', 'ener', 'pga', 'pgv'], syn_sites={}, sx=2686,
+             sy=1789, sz=660, dh=0.008, topography=None):
+
+    met = pickle.load(open(f'results/metrics.pickle', 'rb'))
+    gof = {}
+    for f in freqs:
+        met_rec = met[f]['rec']
+        gof[f] = {}
+        print(f)
+        for model in models:
+            met_syn = met[f][model]
+            gof[f][model] = {}
+            for site in syn_sites:
+                site_name = site[0]
+                gof[f][model][site_name] = collections.defaultdict(int)
+                gof[f][model][site_name]['rhypo'] = np.sqrt((site[2] - sx) ** 2 + (site[1] - sy) ** 2 + sz ** 2) * dh
+                gof[f][model][site_name]['elev'] = topography[site[1], site[2]]
+                for metric in metrics:
+                    gof[f][model][site_name]['gof'] += errorf(met_syn[site_name][metric], met_rec[site_name][metric])
+                gof[f][model][site_name]['gof'] /= len(metrics)
+    with open(f'results/gof.pickle', 'wb') as fid:
+        pickle.dump(gof, fid, protocol=pickle.HIGHEST_PROTOCOL)
+    return gof
+
+
+def plot_gof(mx, my, freqs, models, syn_sites={}, dh=0.008, topography=None):
+    with open('results/gof.pickle', 'rb') as fid:
+        gof = pickle.load(fid)
+    freqs = [freqs] if type(freqs) != list else freqs
+    models = [models] if type(models) != list else models
+
+    fig, ax = plt.subplots(1, 2, dpi=200)
+    fig.subplots_adjust(top=0.7, wspace=0.2)
+    for f in freqs:
+        for model in models:
+            x1 = [gof[f][model][site[0]]['rhypo'] for site in syn_sites]
+            x2 = [gof[f][model][site[0]]['elev'] for site in syn_sites]
+            y = [gof[f][model][site[0]]['gof'] for site in syn_sites]
+            ax[0].scatter(x1, y, label=f'{model}, {f}Hz, {np.median(y):.2f}')
+            ax[0].set(xlabel=r'$R_{hypo}$ (km)', ylabel='GOF')
+            ax[1].scatter(x2, y, label=f'{model}, {f}Hz, {np.median(y):.2f}')
+            ax[1].set(xlabel='Elevation (m)', ylabel='GOF')
+            ax[0].legend(bbox_to_anchor=(0.1, 1.0, 2, 1.2), loc='lower left', ncol = 2, mode=None)
+    return fig
+
+
 if __name__ == "__main__":
     print("Leave it so.")
