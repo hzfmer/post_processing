@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import PowerNorm
 from matplotlib.colors import LogNorm
 from scipy.special import erfc
+from scipy.interpolate import interp1d
 import struct
 import imageio
 import collections
@@ -78,6 +79,7 @@ def rotate(vel, angle):
     vx, vy = vx * np.cos(angle) - vy * np.sin(angle), vx * np.sin(angle) + vy * np.cos(angle)
     return vx, vy
 
+
 def check_mesh_cont(fmesh_0, fmesh_1, nx, ny, nz, verbose=False, nvar=3, skip=3):
     '''Check continuity between upper and lower blocks
     Input:
@@ -139,11 +141,71 @@ def read_snapshot(it, mx, my, model="", case="", comp="X"):
     return v, dt
 
 
+def interp_vel(vel, dt):
+    told = np.arange(len(vel['X'])) * vel['dt']
+    tnew = np.arange(0, len(vel['X']) * vel['dt'], dt)
+    for comp in 'XYZ':
+        v = vel[comp]
+        f = interp1d(told, v, fill_value='extrapolate')
+        vel[comp] = f(tnew)
+    vel['dt'] = dt
+    return vel
+
+
+def trim_vel(vel, tinit, tend):
+    t = np.arange(len(vel['X'])) * vel['dt']
+    idx = np.argwhere(np.logical_and(t >= tinit, t <= tend))
+    for comp in 'XYZ':
+        vel[comp] = np.squeeze(vel[comp][idx])
+    return vel
+
+
+def taper_vel(vel, seconds=2):
+    """
+    This function tapers the last n seconds of vel using a hanning window.
+    """
+    npts = int(2 * seconds / vel['dt'] +1)
+    window = np.hanning(npts)[-int(seconds / vel['dt'] + 1):]
+    for comp in 'XYZ':
+        vel[comp][-len(window):] *= window[-len(window):]
+    return vel
+
+
+def pad_vel(vel, pad_seconds):
+    """
+    Pad pad_seconds zeros at the end
+    """
+    npts = int(pad_seconds / vel['dt'])
+    for comp in 'XYZ':
+        shape = list(vel[comp].shape)
+        vel[comp] = np.pad(vel[comp], (0,npts))
+    return vel
+
+def prepare_bbpvel(vel, tend, shift=0, dt=None,
+        taper_seconds=2, pad_seconds=5):
+    '''Prepare vel following bbp approach
+    1. 10Hz low-pass filter, 4 poles, filtfilt
+    2. Interpolate using 1D linear
+    3. Trim longest waveforms to match the shortest one
+    2. Tapering the last 2 second waveforms
+    3. Pad 5 seconds zeros
+    4. Filter to desired frequency
+    '''
+    vel = filt(vel, 1 / vel['dt'], highcut=10)
+    if dt is not None:
+        vel = interp_vel(vel, dt)
+    vel = trim_vel(vel, shift, tend + shift)
+    vel = taper_vel(vel, taper_seconds)
+    vel = pad_vel(vel, pad_seconds)
+    return vel
+
+
 def read_rec(site, metric='vel', base_shift=582.97):
     '''Read recordings from USC database
     Input:
         site, site name
         base_shift, correct start time, supposed to be 04:09:42.97
+        Ref: https://scec.usc.edu/scecpedia/La_Habra_Simulations_on_Titan
     Return:
         data: Dictionary of "metric" 
     '''
@@ -262,9 +324,15 @@ def pick_psa(mx=0, my=0, models=[], osc_freqs=np.logspace(-1, 1, 91), osc_dampin
     try: 
         with open('results/psa_syn.pickle', 'rb') as fid:
             psa_syn = pickle.load(fid)
+        with open('results/psax_syn.pickle', 'rb') as fid:
+            psax_syn = pickle.load(fid)
+        with open('results/psay_syn.pickle', 'rb') as fid:
+            psay_syn = pickle.load(fid)
     except Exception as e:
         print("Error reading psa_syn: ", e, "\nNew")
         psa_syn = collections.defaultdict(dict)
+        psax_syn = collections.defaultdict(dict)
+        psay_syn = collections.defaultdict(dict)
     
     if all(x in psa_syn.keys() for x in models):
         print("Models queried!")
@@ -284,18 +352,31 @@ def pick_psa(mx=0, my=0, models=[], osc_freqs=np.logspace(-1, 1, 91), osc_dampin
         for model in _models:
             if model not in psa_syn.keys():
                 psa_syn[model] = dict()
+                psax_syn[model] = dict()
+                psay_syn[model] = dict()
+
             print(f"\rGathering psa_syn for {site_name}     of     {model}", end='\r', flush=True)
             accx, accy = (np.diff(x, prepend=0) / vel_syn[model][site_name]['dt'] \
                           for x in [vel_syn[model][site_name]['X'], vel_syn[model][site_name]['Y']])
             psa_syn[model][site_name] = my_pyrotd.my_calc_rotated_spec_accels(
                 vel_syn[model][site_name]['dt'], accx, accy,
                 osc_freqs, osc_damping, percentiles=[50])
+            psax_syn[model][site_name] = my_pyrotd.my_calc_spec_accels(
+                vel_syn[model][site_name]['dt'], accx,
+                osc_freqs, osc_damping)
+            psay_syn[model][site_name] = my_pyrotd.my_calc_spec_accels(
+                vel_syn[model][site_name]['dt'], accy,
+                osc_freqs, osc_damping)
     
     # Rewrite if more models queried than existing
     if len(psa_syn) > init_len:
-        with open('results/psa_syn.pickle', 'wb') as fid:
+        with open('results/psa_syn.pickle', 'wb') as fid, \
+             open('results/psax_syn.pickle', 'wb') as fidx, \
+             open('results/psay_syn.pickle', 'wb') as fidy:
             print("Appending new models for psa")
             pickle.dump(psa_syn, fid, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(psax_syn, fidx, protocol=pickle.HIGHEST_PROTOCOL)
+            pickle.dump(psay_syn, fidy, protocol=pickle.HIGHEST_PROTOCOL)
             
     return {k:psa_syn[k] for k in models}
 
@@ -319,7 +400,7 @@ def plot_snapshot(it, mx, my, model="", case="", draw=False, backend="inline"):
     return image
 
 
-def plot_validation(site_name, models, vels=None, psas=None, lowcut=0.15, highcut=5, metrics=['vel', 'pas'], syn_sites={}, backend="inline", plot_rec=True):
+def plot_validation(site_name, models, vels=None, psas=None, lowcut=0.15, highcut=5, metrics=['vel', 'pas'], comps='XYZ', syn_sites={}, backend="inline", plot_rec=True):
     '''Plot comparison among multiple models
     '''
     vel_syn = pick_vel()
@@ -328,35 +409,37 @@ def plot_validation(site_name, models, vels=None, psas=None, lowcut=0.15, highcu
         return None
     dt_rec = vel_syn['rec'][site_name]['dt']   
     len_rec = len(vel_syn['rec'][site_name]['X'])
-    t_rec = np.arange(len_rec) * dt_rec - vel_syn['rec'][site_name]['shift']
-    comp = {0: "X", 1: "Y", 2: "Z"}
+    t_rec = np.arange(len_rec) * dt_rec # - vel_syn['rec'][site_name]['shift']
     if not vels:
         vels = [vel_syn[model][site_name] for model in models]
     image =[]
     if 'vel' in metrics:
-        fig, ax = plt.subplots(3, 1, dpi=400)
+        fig, ax = plt.subplots(len(comps), 1, dpi=400, squeeze=False)
+        ax = ax.squeeze(axis=-1)
         fig.tight_layout()
         fig.suptitle(f'{site_name}', y=1.05)
-        for i in range(3):   
+        for i in range(len(comps)):   
             if plot_rec:
                 if highcut:
-                    vel = filt_B(vel_syn['rec'][site_name][comp[i]], 1 / dt_rec, lowcut=lowcut, highcut=highcut, causal=False)
+                    vel = filt(vel_syn['rec'][site_name][comps[i]], 1 / dt_rec, lowcut=lowcut, highcut=highcut, causal=False)
                 else:
-                    vel = vel_syn['rec'][site_name][comp[i]]
+                    vel = vel_syn['rec'][site_name][comps[i]]
                 ax[i].plot(t_rec, vel, label='rec, ' + f'Max = {np.max(vel):.4f}')
 
             for j, model in enumerate(models):
-                vel = vels[j][comp[i]]
+                vel = vels[j][comps[i]]
                 dt_syn = vels[j]['dt']
                 t_syn = np.arange(len(vel)) * dt_syn 
                 if highcut:
-                    vel = filt_B(vel, 1 / dt_syn, lowcut=lowcut, highcut=highcut, causal=False)
+                    vel = filt(vel, 1 / dt_syn, lowcut=lowcut, highcut=highcut, causal=False)
                 ax[i].plot(t_syn, vel, lw=0.8, label=model + f", Max = {np.max(vel):.4f}")
 
-            ax[i].set_ylabel(f'V{comp[i]} (m/s)')
+            ax[i].set_ylabel(f'V{comps[i]} (m/s)')
             ax[i].set_xlim(0, 30)
         ax[-1].set_xlabel('Time (s)')
-        ax[0].legend()
+        ax[0].legend(*ax[-1].get_legend_handles_labels(),
+                bbox_to_anchor=(0., 1.02, 1., .102), loc='lower left',
+                ncol=2, mode="expand", borderaxespad=0)
         image += [fig]
 
     if 'psa' in metrics:
@@ -375,7 +458,8 @@ def plot_validation(site_name, models, vels=None, psas=None, lowcut=0.15, highcu
         ax.xaxis.grid(True, which='both')
         ax.yaxis.grid(True, which='both')
         ax.set_xlabel('Frequency (Hz)')
-        ax.legend()
+        ax.legend(bbox_to_anchor=(0., 1.02, 1., .102), loc='lower left',
+                 ncol=2, mode="expand", borderaxespad=0)
         image += [fig2]                     
     return image
 
@@ -411,12 +495,13 @@ def plot_syn_freqs(site_name, models, freqs=[[0.15, 1],[0.15, 5]], lowcut=0.15, 
     ax2 = ax[-1].twinx()
     for i, model in enumerate(models):
         for j, f in enumerate(freqs):
-            if type(f) != list:
+            if type(f) != list or type(f) != tuple:
                 f = [lowcut, f]
             vel = vel_syn[model][site_name]
-            fvel = filt_B(vel[comp], 1 / vel['dt'], lowcut=f[0], highcut=f[1])
+            fvel = filt(vel[comp], 1 / vel['dt'], lowcut=f[0], highcut=f[1], causal=False)
+            print(model, f[-1], np.max(vel[comp]), np.max(fvel))
             ax[0].plot(np.arange(len(vel[comp])) * vel['dt'], fvel + vmax * (j * nm + i),
-                    color=f'C{i+1}', lw=1.2, label=f'{model}, {f[0]:.1f}-{f[1]:.1f}Hz' if j == 0 else None)
+                    color=f'C{i+1}', lw=1.2, label=f'{model}' if j == 0 else None)
             valign = 'top'
             color = ax[0].get_lines()[-1].get_c()
             ax[0].annotate(f'{np.max(np.abs(fvel)):.4f}', (0, fvel[0] + vmax * (j * nm + i)), xytext=(2, 10),
@@ -444,8 +529,8 @@ def plot_syn_freqs(site_name, models, freqs=[[0.15, 1],[0.15, 5]], lowcut=0.15, 
             if type(f) != list:
                 f = [lowcut, f]
             vel = vel_syn['rec'][site_name]
-            fvel = filt_B(vel[comp], 1 / vel['dt'], lowcut=f[0], highcut=f[1])
-            ax[0].plot(np.arange(len(vel[comp])) * vel['dt'] - vel['shift'], fvel + vmax * (j * nm+ nm - 1), lw=1.2, color=f'C0', label=f'data' if j == 0 else None)
+            fvel = filt(vel[comp], 1 / vel['dt'], lowcut=f[0], highcut=f[1], causal=False)
+            ax[0].plot(np.arange(len(vel[comp])) * vel['dt'], fvel + vmax * (j * nm+ nm - 1), lw=1.2, color=f'C0', label=f'data' if j == 0 else None)
             color = ax[0].get_lines()[-1].get_c()
             valign = 'top'
             ax[0].annotate(f'{np.max(np.abs(fvel)):.4f}', (0, fvel[0] + vmax * (j * nm + nm - 1)), xytext=(2, 10),
@@ -457,10 +542,13 @@ def plot_syn_freqs(site_name, models, freqs=[[0.15, 1],[0.15, 5]], lowcut=0.15, 
     ax[0].set(xlabel='Time (s)', ylabel=f'V{comp} (m/s)', xlim=[0, 25], yticklabels=[])
     ax[0].legend(bbox_to_anchor=(0., 1.02, 1., .102), loc='lower left',
                  ncol=2, mode="expand", borderaxespad=0)
-    ax[-1].set(xlabel='Frequency (Hz)', ylabel=f'$SA (m/s^2)$', xlim=[0, 5])
-    ax2.set_ylabel('Ratio')
+    ax[-1].set(xlabel='Frequency (Hz)', ylabel=f'$SA (m/s^2)$', xlim=[0, 10])
     ax[-1].xaxis.grid(True, which='both')
     ax[-1].yaxis.grid(True, which='both')
+    ax2.set_yscale('log')
+    ax2.set_ylabel('Ratio')
+    formatter = mpl.ticker.LogFormatter(labelOnlyBase=False, minor_thresholds=(3, 2.0))
+    ax2.yaxis.set_minor_formatter(formatter)
     ax2.yaxis.grid(True, which='major', color='gray', ls='--')
     ax[-1].legend(bbox_to_anchor=(0., 1.02, 1., .102), loc='lower left',
                   ncol=2, mode="expand", borderaxespad=0)
@@ -471,8 +559,14 @@ def plot_syn_freqs(site_name, models, freqs=[[0.15, 1],[0.15, 5]], lowcut=0.15, 
     return fig
 
 
-def comp_cum_energy(vel, dt=0, lowcut=0.15, highcut=5):
+def comp_cum_energy(vel, dt=0, lowcut=0.15, highcut=5, cav=False):
     '''Compute cumulative energy from velociteis
+    Input:
+        vel (dict or list) : velocities
+        dt (float)         : time step
+        lowcut (float)     : low bound frequency for filtering
+        highcut (float)    : high bound frequency for filtering
+        cav (boolean)      : True-cumulative absolute vel; False-vel**2
     '''
     if issubclass(type(vel), dict):
         dt = vel['dt']
@@ -483,13 +577,17 @@ def comp_cum_energy(vel, dt=0, lowcut=0.15, highcut=5):
         cumvel = np.zeros((len(vel[keys[0]]),), dtype='float32')
         for k in keys:
             v = filt(vel[k], dt=dt, lowcut=lowcut, highcut=highcut)
-            cumvel += comp_cum_energy(v, dt=dt)
+            cumvel += comp_cum_energy(v, dt=dt, cav=cav)
         return cumvel / len(keys)
     vel = np.array(vel)
+    if cav:
+        return np.cumsum(np.abs(vel)) * dt
     return np.cumsum(vel ** 2) * dt
 
 
-def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, my=3456, dh=0.008, syn_sites={}, seed=None, nsites=[], vs30=None, vs=None, plot_rec=True, save=False, sfile=""):
+def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, dh=0.008, 
+        syn_sites={}, seed=None, nsites=[], vs30=None, vs=None, cav=False,
+        plot_rec=True, save=False, sfile=""):
     '''Plot cumulative energy time histories
     '''
     vel_syn = pick_vel()
@@ -516,11 +614,10 @@ def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, my=3456, dh=
         j =  nsites[i]
         site_name = syn_sites[j][0]
         for model in models:
-            cumvel = comp_cum_energy(vel_syn[model][site_name], highcut=highcut)
+            cumvel = comp_cum_energy(vel_syn[model][site_name], lowcut=lowcut, highcut=highcut, cav=cav)
             ax[row, col].plot(vel_syn[model][site_name]['dt'] * np.arange(len(vel_syn[model][site_name]['X'])), cumvel, label=model)
-        cumvel = comp_cum_energy(vel_syn['rec'][site_name], highcut=highcut)
-        shift = vel_syn['rec'][site_name]['shift']
-        ax[row, col].plot(vel_syn['rec'][site_name]['dt'] * np.arange(len(vel_syn['rec'][site_name]['X'])) - shift, cumvel, '--', label='rec')
+        cumvel = comp_cum_energy(vel_syn['rec'][site_name], lowcut=lowcut, highcut=highcut, cav=cav)
+        ax[row, col].plot(vel_syn['rec'][site_name]['dt'] * np.arange(len(vel_syn['rec'][site_name]['X'])), cumvel, '--', label='rec')
         if 'vs30' in locals():
             title = 'Vs30'
             vs = vs30
@@ -528,7 +625,7 @@ def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, my=3456, dh=
             title = 'Vs'
         ax[row, col].set_title(f'Site {j}, {title}={vs[syn_sites[j][1], syn_sites[j][2]]:.1f} m/s')
     if save:
-        saveto = sfile if sfile else f'cum_vel_{models[0]}_{lowcut:.1f}_{highcut:.1f}hz'
+        saveto = sfile if sfile else f'cum_{"vel" if cav else "ener"}_{models[0]}_{lowcut:.1f}_{highcut:.1f}hz'
         fig.savefig(f"results/{saveto}.svg", dpi=400, bbox_inches='tight', pad_inches=0.05)
     return fig
                             
@@ -715,7 +812,8 @@ def comp_metrics(vel_syn=None, lowcut=0.15, highcut=5, save=False):
                     v = vel[site_name]
                 else:
                     v = filt(vel[site_name], lowcut=lowcut, highcut=hc)
-                shift = v.get('shift', 0)
+                # shift = v.get('shift', 0)
+                shift = 0
                 try:
                     dt = v['dt']
                 except:
