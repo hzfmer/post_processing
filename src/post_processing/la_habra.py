@@ -9,6 +9,7 @@ TODO:
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from matplotlib.colors import PowerNorm
 from matplotlib.colors import LogNorm
 from scipy.special import erfc
@@ -19,7 +20,9 @@ import collections
 import pickle
 import sys
 import re
+import os
 import requests
+import subprocess
 from pathlib import Path
 from filter_BU import filt_B
 import my_pyrotd
@@ -273,6 +276,32 @@ def read_syn(ix, iy, mx, my, model="", case=""):
     return data
 
 
+def read_vel(models, syn_sites):
+    vel_syn = collections.defaultdict(dict)
+    for model in models:
+        if Path(model).exists():
+            try:
+                with open(Path(model, 'vel_sites.pickle'), 'rb') as fid:
+                    vel_syn[model] = pickle.load(fid)
+            except:
+                for isite in range(len(syn_sites)):
+                    site_name = syn_sites[isite][0]
+                    print(f'Gathering {len(_models)} ground motions at site {site_name}')
+                    ix, iy = syn_sites[isite][1:]
+                    for model in _models:
+                        if model not in vel_syn.keys():
+                            vel_syn[model] = dict()
+                        vel_syn[model][site_name] = read_syn(ix, iy, mx, my, model=model) 
+            for k in vel_syn[model].keys():  # Each site
+                vel_syn[model][k] = rotate(vel_syn[model][k], -39.9)
+                vel_syn[model][k] = prepare_bbpvel(vel_syn[model][k], tmax)
+
+        else:
+            print("Not a simulated model: ", model)
+            with open(f'results/vel_{model}.pickle', 'rb') as fid:
+                vel_syn[model] = pickle.load(fid)
+
+
 def pick_vel(mx=0, my=0, models=[], syn_sites={}):
     '''Pick velocities from computed outptu
     
@@ -296,21 +325,12 @@ def pick_vel(mx=0, my=0, models=[], syn_sites={}):
     for key in vel_syn.keys():
         if key in _models:
             _models.remove(key)
-    for isite in range(len(syn_sites)):
-        site_name = syn_sites[isite][0]
-        print(f'Gathering {len(_models)} ground motions at site {site_name}')
-        ix, iy = syn_sites[isite][1:]
-        if site_name not in vel_syn['rec']:
-            vel_syn['rec'][site_name] = read_rec(site_name)
-        for model in _models:
-            if model not in vel_syn.keys():
-                vel_syn[model] = dict()
-            vel_syn[model][site_name] = read_syn(ix, iy, mx, my, model=model) 
+    _vel_syn = read_vel(_models, syn_sites)
+    vel_syn = {**vel_syn, **_vel_syn}
             
     if len(vel_syn) > init_len:
         with open('results/vel_syn.pickle', 'wb') as fid:
             pickle.dump(vel_syn, fid, protocol=pickle.HIGHEST_PROTOCOL)
-            
             
     return {k: vel_syn[k] for k in models}
 
@@ -786,6 +806,79 @@ def plot_diff_hist(mx, my, models, freqs=[1, 5], metric='pgv', vmax=2, lowcut=0.
     return [fig, fig2], val_dif
                             
 
+def prepare_tf_misfit(model, vel_syn=None, fmin=0.15, fmax=5, exec_path='results', IS_S2_REFERENCE='true', LOCAL_NORM='false'):
+    curdir = os.getcwd()
+    os.chdir(exec_path) 
+    if not vel_syn:
+        with open('vel_syn.pickle', 'rb') as fid:
+            vel_syn = pickle.load(fid)
+    
+    try:
+        tf_misfit = dict()
+        for j, k in enumerate(vel_syn['rec'].keys()):
+            with open('HF_TF-MISFIT_GOF', 'w') as fid:
+                fid.write(f'{len(vel_syn[model][k]["X"])}\n{vel_syn[model][k]["dt"]}\n{fmin} {fmax}\n'
+                          f'syn_{k}.dat\nrec_{k}.dat\n3\n.{IS_S2_REFERENCE}.\n.{LOCAL_NORM}.') 
+            command = ['./tf_misfits_gof', 'HF_TF-MISFIT_GOF']
+            p = subprocess.call(command,
+                                stdout = subprocess.PIPE,
+                                stdin  = subprocess.PIPE,
+                                stderr = subprocess.STDOUT )
+            tf_misfit[k] = np.genfromtxt('MISFIT-GOF.DAT')
+            print(f"\rDone {j} / {len(vel_syn['rec'].keys())}", end='\r', flush=True)
+            os.remove('MISFIT-GOF.DAT')
+    except OSError as e:
+        print("Error", e)
+    finally:
+        print("\n")
+        os.chdir(curdir)
+    return tf_misfit
+
+
+def plot_tf_misfit(f=(0.15, 5), metric='EM'):
+    '''
+    Input:
+        f (tuple) : lowcut and highcut frequency
+        metric (string) : 'EM' (envelope misfit)
+                          'PM' (phase misfit)
+                          'EG' (envelope gof)
+                          'PG' (phase gof)
+    '''
+    labels = {'EM': 'Env-Misfit',
+              'PM': 'Phase-Misfit',
+              'EG': 'Env-GoF',
+              'PG': 'Phase-GoF'}
+    xi = 3 if 'G' in metric else 0  # 3-6 is GoF, 0-3 is Misfit
+    yi = 0 if 'E' in metric else 1  # Col 0 is Envelope; Col 1 is Phase
+    with open('results/tf_misfit.pickle', 'rb') as fid:
+        tf_misfit = pickle.load(fid) 
+    met = pickle.load(open(f'results/metrics.pickle', 'rb'))
+    colors = list(mcolors.TABLEAU_COLORS.keys())
+    comps = 'XYZ'
+    cases = ['noqf_orig', 'topo_noqf_orig', 'noqf_s05h005l100', 'topo_qf06_s05h005l100']
+    fig, ax = plt.subplots(3, 1, dpi=400, sharex=True)
+    plt.tight_layout()
+    for i in range(3):
+        for j, case in enumerate(cases):
+            for k, (dhyp, seed) in enumerate(zip([1,1,2,2,0.5], [1848640878, 387100462, 372823598, 462574446, 1485839278])):
+
+                model = f'dhyp{dhyp:.2f}_s{seed}_{case}' if dhypo != 0.5 else case
+                try:
+                    data = np.mean(list(tf_misfit[f][model][key][xi + i, yi] for key in tf_misfit[f][model].keys())) / 10
+                    r = np.mean(list(met[f][model][site]['pgv'] / met[f]['rec'][site]['pgv'] for site in met[f]['rec'].keys()))
+                    if r >= 1:
+                    marker = '^' if r >= 1 else 'v'
+                    label = None if j else f'{dhyp:.1f}_{seed:5d}'
+                    ax[i].scatter(j + 1, data, 50, marker=marker, c=colors[k],
+                         label=label)
+                except:
+                    print(model)
+                    break
+
+        ax[i].set(xticks=range(1,5), ylabel=f'{labels[metric]}-{comps[i]}')
+    ax[-1].set_xticklabels(cases, rotation=0)
+    ax[0].legend(loc=1)
+
 def comp_metrics(vel_syn=None, lowcut=0.15, highcut=5, save=False):
     if not vel_syn:
         with open('results/vel_syn.pickle', 'rb') as fid:
@@ -882,8 +975,13 @@ def comp_GOF(freqs, models, metrics=['arias', 'dur', 'ener', 'pga', 'pgv'], syn_
 
 
 def plot_gof(freqs, models, metric="gof", syn_sites={}, lowcut=0.15, window=2):
+    ''' Plot Goodness-of-fit
+
+    '''
     with open(f'results/gof.pickle', 'rb') as fid:
         gof = pickle.load(fid)
+    if metric in ['EM', 'PM', 'EG', 'PG']:
+        met = pickle.load(open(f'results/tf_misfit.pickle', 'rb'))
     if metric != 'gof':
         met = pickle.load(open(f'results/metrics.pickle', 'rb'))
     freqs = [freqs] if type(freqs) != list else freqs
