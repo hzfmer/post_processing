@@ -651,7 +651,7 @@ def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, dh=0.008,
                             
 
 
-def plot_metric_map(mx, my, models, f=1, metric='pgv', vmax = 1e6, topography=None, nd=250, step=5, sx=2686, sy=1789, syn_sites={}, save=False, sfile=""):
+def plot_metric_map(mx, my, models, f=1, metric='pgv', vmax = 1e6, topography=None, nd=250, step=5, sx=2753, sy=1827, syn_sites={}, save=False, sfile=""):
     sx, sy = (sx - nd) // step, (sy - nd) // step
     val = collections.defaultdict()
     fig, ax = plt.subplots((len(models) - 1) // 2 + 1, 2, dpi=200)
@@ -677,7 +677,7 @@ def plot_metric_map(mx, my, models, f=1, metric='pgv', vmax = 1e6, topography=No
     return fig
 
 
-def plot_diff_map(mx, my, models, f=(2.5, 5), metric='pgv', vmax=2, lowcut=0.15, topography=None, nd=250, step=5, sx=2686, sy=1789, dh=0.008, save=False, sfile=""):
+def plot_diff_map(mx, my, models, f=(2.5, 5), metric='pgv', vmax=2, lowcut=0.15, topography=None, nd=250, step=5, sx=2753, sy=1827, dh=0.008, save=False, sfile=""):
     '''plot ratio map and histogram
     Input
     -----
@@ -720,7 +720,7 @@ def plot_diff_map(mx, my, models, f=(2.5, 5), metric='pgv', vmax=2, lowcut=0.15,
     return fig
 
 
-def plot_diff_hist(mx, my, models, freqs=[1, 5], metric='pgv', vmax=2, lowcut=0.15, topography=None, nd=250, step=5, sx=2686, sy=1789, save=False, sfile=""):
+def plot_diff_hist(mx, my, models, freqs=[1, 5], metric='pgv', vmax=2, lowcut=0.15, topography=None, nd=250, step=5, sx=2753, sy=1827, save=False, sfile=""):
     '''plot ratio map and histogram
     Input
     -----
@@ -835,7 +835,7 @@ def prepare_tf_misfit(model, vel_syn=None, fmin=0.15, fmax=5, exec_path='results
     return tf_misfit
 
 
-def plot_tf_misfit(f=(0.15, 5), metric='EM'):
+def plot_tf_misfit(f=(0.15, 5), metric='EG', ref='pga'):
     '''
     Input:
         f (tuple) : lowcut and highcut frequency
@@ -862,14 +862,16 @@ def plot_tf_misfit(f=(0.15, 5), metric='EM'):
         for j, case in enumerate(cases):
             for k, (dhyp, seed) in enumerate(zip([1,1,2,2,0.5], [1848640878, 387100462, 372823598, 462574446, 1485839278])):
 
-                model = f'dhyp{dhyp:.2f}_s{seed}_{case}' if dhypo != 0.5 else case
+                model = f'dhyp{dhyp:.2f}_s{seed}_{case}' if dhyp != 0.5 else case
                 try:
-                    data = np.mean(list(tf_misfit[f][model][key][xi + i, yi] for key in tf_misfit[f][model].keys())) / 10
-                    r = np.mean(list(met[f][model][site]['pgv'] / met[f]['rec'][site]['pgv'] for site in met[f]['rec'].keys()))
-                    if r >= 1:
+                    data = np.mean(list(tf_misfit[f][model][key][xi + i, yi] for key in tf_misfit[f][model].keys())) 
+                    if 'G' in metric:  # Goodness of Fit ~ [0-1]
+                        data /= 10
+                    r = np.mean(list(met[f][model][site][ref] / met[f]['rec'][site][ref] for site in met[f]['rec'].keys()))
+                    r = (r / (3 + r)) ** 2  # Map r to [0 - 1]
                     marker = '^' if r >= 1 else 'v'
                     label = None if j else f'{dhyp:.1f}_{seed:5d}'
-                    ax[i].scatter(j + 1, data, 50, marker=marker, c=colors[k],
+                    ax[i].scatter(j + 1, data, 250 * r, marker=marker, c=colors[k],
                          label=label)
                 except:
                     print(model)
@@ -879,11 +881,48 @@ def plot_tf_misfit(f=(0.15, 5), metric='EM'):
     ax[-1].set_xticklabels(cases, rotation=0)
     ax[0].legend(loc=1)
 
-def comp_metrics(vel_syn=None, lowcut=0.15, highcut=5, save=False):
+
+def plot_tf_misfit_mesh(models, f=(0.15, 5), ref='pga'):
+    '''
+    Input:
+        f (tuple) : lowcut and highcut frequency
+        metric (string) : 'EM' (envelope misfit)
+                          'PM' (phase misfit)
+                          'EG' (envelope gof)
+                          'PG' (phase gof)
+    '''
+    with open('results/tf_misfit.pickle', 'rb') as fid:
+        tf_misfit = pickle.load(fid) 
+    met = pickle.load(open(f'results/metrics.pickle', 'rb'))
+    colors = list(mcolors.TABLEAU_COLORS.keys())
+    comps = 'XYZ'
+    fig, ax = plt.subplots(1, 3, figsize=(6, 3), dpi=400, sharey=True)
+    plt.tight_layout()
+    for i in range(3):
+        for j, model in enumerate(models):
+            try:
+                EG = np.mean(list(tf_misfit[f][model][key][3 + i, 0] for key in tf_misfit[f][model].keys())) / 10
+                PG = np.mean(list(tf_misfit[f][model][key][3 + i, 1] for key in tf_misfit[f][model].keys())) / 10
+                r = np.mean(list(met[f][model][site][ref] / met[f]['rec'][site][ref] for site in met[f]['rec'].keys()))
+                marker = '^' if r >= 1 else 'v'
+                r = (r / (3 + r)) ** 2  # Map r to [0 - 1]
+                ax[i].scatter(EG, j, 250 * r, marker=marker, c=colors[0],
+                        label='EG' if j == 0 else None)
+                ax[i].scatter(PG, j, 250 * r, marker=marker, c=colors[1],
+                        label='PG' if j == 0 else None)
+            except:
+                print(model)
+                break
+
+        ax[i].set(yticks=range(len(models) + 1), xlabel=f'GoF-{comps[i]}')
+    ax[0].set_yticklabels(models, rotation=0)
+    ax[-1].legend(*ax[-1].get_legend_handles_labels(), loc=1)
+
+
+def comp_metrics(vel_syn=None, lowcut=0.15, highcut=5, tmax=35, save=False):
     if not vel_syn:
         with open('results/vel_syn.pickle', 'rb') as fid:
             vel_syn = pickle.load(fid)
-    tmax = 30  # Simulation length
     g = 9.8
     _highcut = [highcut] if type(highcut) != list else highcut
     try:
@@ -918,14 +957,16 @@ def comp_metrics(vel_syn=None, lowcut=0.15, highcut=5, save=False):
                 vz = v['Z'][start : end]
                 cx, cy, cz = np.cumsum(vx ** 2), np.cumsum(vy ** 2), np.cumsum(vz ** 2)
 
-                accx = np.diff(vx, prepend=0) ** 2
-                accy = np.diff(vy, prepend=0) ** 2
-                accz = np.diff(vz, prepend=0) ** 2
+                accx = np.diff(vx, prepend=0) 
+                accy = np.diff(vy, prepend=0)
+                accz = np.diff(vz, prepend=0)
 
                 x_5, x_75 = np.argwhere(cx >= 0.05 * cx[-1])[0], np.argwhere(cx >= 0.75 * cx[-1])[0]
                 y_5, y_75 = np.argwhere(cy >= 0.05 * cy[-1])[0], np.argwhere(cy >= 0.75 * cy[-1])[0]
                 z_5, z_75 = np.argwhere(cz >= 0.05 * cz[-1])[0], np.argwhere(cz >= 0.75 * cz[-1])[0]
                 metrics[key][model][site_name]['ener'] = np.sum(vx ** 2 + vy ** 2 + vz ** 2) * dt / 3
+                metrics[key][model][site_name]['cav'] = np.sum(np.abs(accx) + np.abs(accy) + np.abs(accz)) * dt / 3
+                metrics[key][model][site_name]['cad'] = np.sum(np.abs(vx) + np.abs(vy) + np.abs(vz)) * dt / 3
                 metrics[key][model][site_name]['pgv'] = np.sqrt(np.max(vx ** 2 + vy ** 2 + vz ** 2))
                 metrics[key][model][site_name]['dur'] = (x_75 - x_5 + y_75 - y_5 + z_75 - z_5) * dt / 3
                 metrics[key][model][site_name]['pga'] = np.sqrt(np.max(accx ** 2 + accy ** 2 + accz ** 2))
@@ -940,8 +981,8 @@ def errorf(x, y):
     return 100 * erfc(2 * abs(x - y) / (x + y))
 
 
-def comp_GOF(freqs, models, metrics=['arias', 'dur', 'ener', 'pga', 'pgv'], syn_sites={}, sx=2686,
-             sy=1789, sz=660, dh=0.008, lowcut=0.15, vs=None, topography=None, save=True):
+def comp_GOF(freqs, models, metrics=['arias', 'dur', 'ener', 'pga', 'pgv'], syn_sites={}, sx=2753,
+             sy=1827, sz=708, dh=0.008, lowcut=0.15, vs=None, topography=None, save=True):
 
     met = pickle.load(open(f'results/metrics.pickle', 'rb'))
     gof = {}
