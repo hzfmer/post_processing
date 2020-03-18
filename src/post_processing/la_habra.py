@@ -10,10 +10,12 @@ import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+from matplotlib.ticker import ScalarFormatter
 from matplotlib.colors import PowerNorm
 from matplotlib.colors import LogNorm
 from scipy.special import erfc
 from scipy.interpolate import interp1d
+from scipy.interpolate import griddata
 import struct
 import imageio
 import collections
@@ -484,6 +486,34 @@ def plot_validation(site_name, models, vels=None, psas=None, lowcut=0.15, highcu
     return image
 
 
+def plot_rotd50_bias(model):
+    psa = pickle.load(open('results/psa_syn.pickle', 'rb'))
+    psax = pickle.load(open('results/psax_syn.pickle', 'rb'))
+    psay = pickle.load(open('results/psay_syn.pickle', 'rb'))
+    sites = list(psa['rec'].keys())
+    periods = [1 / f for f in psa['rec'][sites[0]].osc_freq]
+    def comp_bias(psa):
+        m = np.zeros((len(periods),), dtype='float32')
+        std = np.zeros((len(periods),), dtype='float32')
+        for i in range(len(periods)):
+            ratio = [np.log(psa['rec'][s].spec_accel[i] / psa[model][s].spec_accel[i]) for s in sites]
+            m[i] = np.mean(ratio)
+            std[i] = np.std(ratio)
+        return m, std
+    
+    titles = ['RotD50', 'PSA East', 'PSA North']
+    fig, ax = plt.subplots(3, 1, dpi=400)
+    fig.subplots_adjust(hspace=0.9)
+    for i, p in enumerate([psa, psax, psay]):
+        m, std = comp_bias(p)
+        ax[i].plot(periods, m)
+        ax[i].fill_between(periods, m - std, m + std, color='gray', alpha=0.3)
+        ax[i].set(xscale='log', ylabel='ln (data/syn)', xlabel='Period (sec)', title=titles[i])
+        ax[i].get_xaxis().set_major_formatter(ScalarFormatter())
+
+    return
+    
+
 def plot_syn_freqs(site_name, models, freqs=[[0.15, 1],[0.15, 5]], lowcut=0.15, comp='Z', plot_rec=False, save=False, sfile=""):
     '''
     Plot comparison between synthetics and their psa if required, similar to plot_validation
@@ -649,6 +679,27 @@ def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, dh=0.008,
         fig.savefig(f"results/{saveto}.svg", dpi=400, bbox_inches='tight', pad_inches=0.05)
     return fig
                             
+
+def plot_interp_map(model, mx, my, f=(0.15, 2.5), metric='pgv', syn_sites=None, topography=None, step=5, sx=2753, sy=1827):
+    x, y = np.meshgrid(np.arange(0, mx, step), np.arange(0, my, step))
+    met = pickle.load(open('results/metrics.pickle', 'rb'))
+    xi = np.zeros(len(syn_sites))
+    yi = np.zeros(len(syn_sites))
+    zi = np.zeros(len(syn_sites))
+    fig, ax = plt.subplots(dpi=300)
+    for i, s in enumerate(syn_sites):
+        xi[i] = s[2] 
+        yi[i] = mx - s[1] 
+        zi[i] = met[f]['rec'][s[0]][metric] / met[f][model][s[0]][metric]
+    print(zi)
+    z = griddata((xi, yi), zi, (x, y), method='cubic')
+    image = ax.contourf(x, y, z, cmap='hot_r')
+    ax.scatter(sx, sy, 300, color='k', marker='*')
+    ax.contour(x, y, np.rot90(topography[::step, ::step]), 5, cmap='cividis', linewidths=0.5)
+    plt.colorbar(image, ax=ax, orientation='vertical')
+    im = ax.scatter(xi, yi, s=200, marker='^', c=zi, cmap='binary')
+    plt.colorbar(im, ax=ax, orientation='horizontal')
+    return
 
 
 def plot_metric_map(mx, my, models, f=1, metric='pgv', vmax = 1e6, topography=None, nd=250, step=5, sx=2753, sy=1827, syn_sites={}, save=False, sfile=""):
@@ -835,7 +886,7 @@ def prepare_tf_misfit(model, vel_syn=None, fmin=0.15, fmax=5, exec_path='results
     return tf_misfit
 
 
-def plot_tf_misfit(f=(0.15, 5), metric='EG', ref='pga'):
+def plot_tf_misfit(f=(0.15, 5), metric='EG', ref='pgv'):
     '''
     Input:
         f (tuple) : lowcut and highcut frequency
@@ -868,10 +919,9 @@ def plot_tf_misfit(f=(0.15, 5), metric='EG', ref='pga'):
                     if 'G' in metric:  # Goodness of Fit ~ [0-1]
                         data /= 10
                     r = np.mean(list(met[f][model][site][ref] / met[f]['rec'][site][ref] for site in met[f]['rec'].keys()))
-                    r = (r / (3 + r)) ** 2  # Map r to [0 - 1]
                     marker = '^' if r >= 1 else 'v'
                     label = None if j else f'{dhyp:.1f}_{seed:5d}'
-                    ax[i].scatter(j + 1, data, 250 * r, marker=marker, c=colors[k],
+                    ax[i].scatter(j + 1, data, 60 * r ** 1.5, marker=marker, c=colors[k],
                          label=label)
                 except:
                     print(model)
@@ -879,7 +929,7 @@ def plot_tf_misfit(f=(0.15, 5), metric='EG', ref='pga'):
 
         ax[i].set(xticks=range(1,5), ylabel=f'{labels[metric]}-{comps[i]}')
     ax[-1].set_xticklabels(cases, rotation=0)
-    ax[0].legend(loc=1)
+    ax[0].legend(bbox_to_anchor=(1, .5), loc='lower left', bbox_transform=plt.gcf().transFigure, fancybox=True)
 
 
 def plot_tf_misfit_mesh(models, f=(0.15, 5), ref='pga'):
@@ -905,18 +955,17 @@ def plot_tf_misfit_mesh(models, f=(0.15, 5), ref='pga'):
                 PG = np.mean(list(tf_misfit[f][model][key][3 + i, 1] for key in tf_misfit[f][model].keys())) / 10
                 r = np.mean(list(met[f][model][site][ref] / met[f]['rec'][site][ref] for site in met[f]['rec'].keys()))
                 marker = '^' if r >= 1 else 'v'
-                r = (r / (3 + r)) ** 2  # Map r to [0 - 1]
-                ax[i].scatter(EG, j, 250 * r, marker=marker, c=colors[0],
-                        label='EG' if j == 0 else None)
-                ax[i].scatter(PG, j, 250 * r, marker=marker, c=colors[1],
-                        label='PG' if j == 0 else None)
+                ax[i].scatter(EG, j, 40 * r ** 1.5, marker=marker, c=colors[0],
+                        label='Env GoF' if j == 0 else None)
+                ax[i].scatter(PG, j, 40 * r ** 1.5, marker=marker, c=colors[1],
+                        label='Phase GoF' if j == 0 else None)
             except:
                 print(model)
                 break
 
         ax[i].set(yticks=range(len(models) + 1), xlabel=f'GoF-{comps[i]}')
     ax[0].set_yticklabels(models, rotation=0)
-    ax[-1].legend(*ax[-1].get_legend_handles_labels(), loc=1)
+    ax[-1].legend(bbox_to_anchor=(1., 0.5), loc='lower left', fancybox=True)
 
 
 def comp_metrics(vel_syn=None, lowcut=0.15, highcut=5, tmax=35, save=False):
@@ -998,6 +1047,8 @@ def comp_GOF(freqs, models, metrics=['arias', 'dur', 'ener', 'pga', 'pgv'], syn_
         gof[f] = {}
         print(f)
         for model in models:
+            if model == 'rec':
+                continue
             met_syn = met[f][model]
             gof[f][model] = {}
             for site in syn_sites:
