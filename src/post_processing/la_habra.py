@@ -4,15 +4,23 @@ TODO:
     1. Adjust how to imshow maps
     2. Correct the way incrementally pick psa/vel
     3. use multiprocessing to accelerate?
+
+Note:
+    site_idx: orig is left upper, x goes toward southeast, y points northeast
+    source_idx: sx along northeast; sy along southeast
+    topo/vs30: orig the same as site_idx
 """
 
 import numpy as np
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import matplotlib.offsetbox
+from matplotlib.lines import Line2D
 from matplotlib.ticker import ScalarFormatter
 from matplotlib.colors import PowerNorm
 from matplotlib.colors import LogNorm
+from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 from scipy.special import erfc
 from scipy.interpolate import interp1d
 from scipy.interpolate import griddata
@@ -35,10 +43,20 @@ __copyright__ = "Zhifeng Hu, SDSU/UCSD"
 __license__ = "mit"
 
 
+def force_iterable(x):
+    return x if isinstance(x, collections.abc.Iterable) or isinstance(x, str) else [x]
+
+def call_sub(cmd, shell=False):
+    p = subprocess.run(cmd, shell=shell, capture_output=True)
+    if p.stderr:
+        print("Error\n", p)
+    return p
+
 
 def read_param(model):
     '''Read parameters from local "param.sh"
     '''
+    tmax = dt = tskip = wstep = nfile = 1
     with open(Path(model, 'param.sh'), 'r') as fid:
         for line in fid:
             if "TMAX" in line:
@@ -47,21 +65,21 @@ def read_param(model):
                 dt = float(re.findall(r'(?<=DT )\d+\.+\d+(?= )', line)[0])
             if "NTISKP" in line:
                 tskip = int(re.findall(r'NTISKP (\d+)', line)[0])
-                dt = dt * tskip
             if "WRITE_STEP" in line:
                 wstep = int(re.findall(r'WRITE_STEP (\d+)', line)[0])
     nfile = int(tmax / dt) // wstep
     return tmax, dt, tskip, wstep, nfile
 
 
-def filt(vel, dt=1, lowcut=0.15, highcut=5, causal=False):
+def filt(vel, fs=1, lowcut=0.15, highcut=5, causal=False):
     '''Filter data
     Input:
         vel     dict.keys=['dt', 'X', 'Y', 'Z'], or list
         rest    parameters for Butterworth filters.
     '''
     if not issubclass(type(vel), dict):
-        return filt_B(vel, 1 / dt, lowcut, highcut, causal=causal) 
+        res = filt_B(vel, fs, lowcut, highcut, causal=causal)
+        return res
     data = {}
     for comp in vel.keys():
         if comp in 'XYZ':
@@ -134,10 +152,10 @@ def read_snapshot(it, mx, my, model="", case="", comp="X"):
     tmax, dt, tskip, wstep, _ = read_param(model)
     nt = int(tmax / dt)
     model = Path(model, "output_sfc" if not case else f"output_sfc_{case}")
-    fnum = int(np.ceil((it + 1) / wstep) * wstep * tskip)
+    fnum = int(np.ceil((it + 1) // (wstep * tskip) ) * wstep * tskip)
     print(f'\r{it} / {nt}, fnum={fnum}', end="\r", flush=True)
     fid = open(f'{model}/S{comp}_0_{fnum:07d}', 'rb')
-    skip = 4 * ((it - fnum // tskip + wstep) * mx * my)
+    skip = 4 * ((it - fnum) // tskip + wstep) * mx * my
     fid.seek(skip, 0)
     v = np.frombuffer(fid.read(mx * my * 4), dtype='float32').reshape(my, mx)
     v = v.copy()
@@ -172,7 +190,7 @@ def taper_vel(vel, seconds=2):
     npts = int(2 * seconds / vel['dt'] +1)
     window = np.hanning(npts)[-int(seconds / vel['dt'] + 1):]
     for comp in 'XYZ':
-        vel[comp][-len(window):] *= window[-len(window):]
+        vel[comp][-len(window):] *= window
     return vel
 
 
@@ -190,11 +208,15 @@ def prepare_bbpvel(vel, tend, shift=0, dt=None,
         taper_seconds=2, pad_seconds=5):
     '''Prepare vel following bbp approach
     1. 10Hz low-pass filter, 4 poles, filtfilt
-    2. Interpolate using 1D linear
+    2. Interpolate using 1D linear interpolation method, if dt applied
     3. Trim longest waveforms to match the shortest one
     2. Tapering the last 2 second waveforms
     3. Pad 5 seconds zeros
     4. Filter to desired frequency
+
+    Reference
+    ---------
+    https://github.com/SCECcode/HighF
     '''
     vel = filt(vel, 1 / vel['dt'], highcut=10)
     if dt is not None:
@@ -222,25 +244,36 @@ def read_rec(site, metric='vel', base_shift=582.97):
     recordings = r.text.split('\r\n')
 
     stime = re.findall(r'\d+:\d+:\d+', recordings[4].split(',')[1])[0].split(':')
-    channel = {1: "Y", 2: "Z", 3: "X"}
-    count = 0
     data = {}
+    min_len = float('inf')
     for i in range(len(recordings)):
+        if 'Chan' in recordings[i] and re.findall(r'^Chan  \d:.*', recordings[i]):
+            chan = re.findall(r'^Chan  \d:.*', recordings[i])[0].split()[2]
+        # Find lines starting with "7600 points of accel data equally"
         if "points" in recordings[i] and metric in recordings[i]:    
             nums = re.findall(r'\d*\.*\d+', recordings[i])
             if len(nums) <= 1:  # skip headers
                 continue
-            count += 1
             npts = int(nums[0])
             dt_rec = float(nums[1])        
             start = i + 1
             end = i + (npts - 1) // 8 + 2
             # convert cm/s/s to m/s/s
-            data[channel[count]] = np.array([float(x) / 100 for y in recordings[start : end] \
+            tmp = np.array([float(x) / 100 for y in recordings[start : end] \
                                            for x in y.replace('-', ' -').split()])
-            assert(len(data[channel[count]]) == npts)
-            # data[channel[count]] = filt_B(np.array(data[channel[count]], dtype='float32'),1 / dt_rec, causal=False)
-    print(f"Number of points = {npts}, dt_recording = {dt_rec}")
+            # In case records have different length in different components, just crop
+            min_len = min(min_len, len(tmp))
+            tmp = tmp[:min_len]
+            if "Up" not in chan:
+                chan = int(chan) if chan.isdigit() else (0 if 'X' in data else 90)
+                data['X'] = tmp * np.sin(np.radians(int(chan))) + (data['X'][:min_len] if 'X' in data else 0)
+                data['Y'] = tmp * np.cos(np.radians(int(chan))) + (data['Y'][:min_len] if 'Y' in data else 0)
+            else:
+                data['Z'] = tmp
+    assert len(data) == 3
+    for comp in 'XYZ':
+        data[comp] = data[comp][:min_len]
+    print(f"Number of points = {min_len}, dt_recording = {dt_rec}")
     data["dt"] = dt_rec
     data['shift'] = base_shift - (float(stime[-2]) * 60 + float(stime[-1]))
     return data
@@ -254,7 +287,8 @@ def read_syn(ix, iy, mx, my, model="", case=""):
     '''
 
     data = collections.defaultdict(list)
-    _, dt_syn, tskip, wstep, nfile = read_param(model)
+    _, dt, tskip, wstep, nfile = read_param(model)
+    dy_syn = dt * tskip  # The synthetics are with larger dt, scaled by tskip
     print(model, dt_syn, tskip, wstep, nfile)
 
     model = Path(model, "output_sfc" if not case else f"output_sfc_{case}")
@@ -367,9 +401,10 @@ def pick_psa(mx=0, my=0, models=[], osc_freqs=np.logspace(-1, 1, 91), osc_dampin
         if key in _models:
             _models.remove(key)
     vel_syn = pick_vel(mx, my, models.copy(), syn_sites)
-            
+    print(_models) 
     for isite in range(len(syn_sites)):
         site_name = syn_sites[isite][0]
+        print(f"\nGathering psa_syn for {site_name}")
 
         for model in _models:
             if model not in psa_syn.keys():
@@ -377,7 +412,7 @@ def pick_psa(mx=0, my=0, models=[], osc_freqs=np.logspace(-1, 1, 91), osc_dampin
                 psax_syn[model] = dict()
                 psay_syn[model] = dict()
 
-            print(f"\rGathering psa_syn for {site_name}     of     {model}", end='\r', flush=True)
+            print(f"\r: {model}", end='\r', flush=True)
             accx, accy = (np.diff(x, prepend=0) / vel_syn[model][site_name]['dt'] \
                           for x in [vel_syn[model][site_name]['X'], vel_syn[model][site_name]['Y']])
             psa_syn[model][site_name] = my_pyrotd.my_calc_rotated_spec_accels(
@@ -422,7 +457,7 @@ def plot_snapshot(it, mx, my, model="", case="", draw=False, backend="inline"):
     return image
 
 
-def plot_validation(site_name, models, vels=None, psas=None, lowcut=0.15, highcut=5, metrics=['vel', 'pas'], comps='XYZ', syn_sites={}, backend="inline", plot_rec=True):
+def plot_validation(site_name, models, vels=None, psas=None, lowcut=0.15, highcut=5, metrics=['vel'], comps='XYZ', syn_sites={}, backend="inline", ncol=2, labels=None, plot_rec=True, causal=False):
     '''Plot comparison among multiple models
     '''
     vel_syn = pick_vel()
@@ -435,40 +470,46 @@ def plot_validation(site_name, models, vels=None, psas=None, lowcut=0.15, highcu
     if not vels:
         vels = [vel_syn[model][site_name] for model in models]
     image =[]
-    if 'vel' in metrics:
-        fig, ax = plt.subplots(len(comps), 1, dpi=400, squeeze=False)
+    if 'vel' in metrics or 'acc' in metrics:
+        fig, ax = plt.subplots(len(comps), 1, dpi=600, squeeze=False)
         ax = ax.squeeze(axis=-1)
         fig.tight_layout()
-        fig.suptitle(f'{site_name}', y=1.05)
+        fig.suptitle(f'{site_name}', y=1.08)
         for i in range(len(comps)):   
             if plot_rec:
+                vel = vel_syn['rec'][site_name][comps[i]] * 100
+                if 'acc' in metrics:
+                    vel = np.gradient(vel, dt_rec)  # Take accelerations
                 if highcut:
-                    vel = filt(vel_syn['rec'][site_name][comps[i]], 1 / dt_rec, lowcut=lowcut, highcut=highcut, causal=False)
-                else:
-                    vel = vel_syn['rec'][site_name][comps[i]]
-                ax[i].plot(t_rec, vel, label='rec, ' + f'Max = {np.max(vel):.4f}')
+                    vel = filt(vel, 1 / dt_rec, lowcut=lowcut, highcut=highcut, causal=causal)
+                ax[i].plot(t_rec, vel, label='Data, ' + f'Max = {np.max(vel):.4f}' if not labels else "Data")
 
             for j, model in enumerate(models):
-                vel = vels[j][comps[i]]
+                vel = vels[j][comps[i]] * 100
                 dt_syn = vels[j]['dt']
+                if 'acc' in metrics:
+                    vel = np.gradient(vel, dt_syn)  # Take accelerations
                 t_syn = np.arange(len(vel)) * dt_syn 
                 if highcut:
-                    vel = filt(vel, 1 / dt_syn, lowcut=lowcut, highcut=highcut, causal=False)
-                ax[i].plot(t_syn, vel, lw=0.8, label=model + f", Max = {np.max(vel):.4f}")
+                    vel = filt(vel, 1 / dt_syn, lowcut=lowcut, highcut=highcut, causal=causal)
+                label = labels[j] if labels else model + f", Max = {np.max(vel):.4f}"
+                ax[i].plot(t_syn, vel, lw=0.8, label=label)
 
-            ax[i].set_ylabel(f'V{comps[i]} (m/s)')
-            ax[i].set_xlim(0, 30)
-        ax[-1].set_xlabel('Time (s)')
+            ax[i].set_ylabel(f'V{comps[i]} (cm/s)' if 'vel' in metrics else f'Acc{comps[i]} (cm/s/s)')
+            ax[i].set_xlim(0, t_syn[-1])
+            ax[i].set_xlabel('Time (s)')
+            ax[i].yaxis.set_minor_locator(AutoMinorLocator(4))
+            ax[i].grid(which='minor', alpha=0.3)
         ax[0].legend(*ax[-1].get_legend_handles_labels(),
                 bbox_to_anchor=(0., 1.02, 1., .102), loc='lower left',
-                ncol=2, mode="expand", borderaxespad=0)
+                ncol=ncol, mode="expand", borderaxespad=0)
         image += [fig]
 
     if 'psa' in metrics:
         if not psas:
             psas = [psa_syn[model][site_name] for model in models]
         psa_syn = pick_psa()
-        fig2, ax = plt.subplots(dpi=400)
+        fig2, ax = plt.subplots(dpi=600)
         fig2.tight_layout()
         fig2.suptitle(f'{site_name}', y=1.05) 
         if plot_rec:
@@ -549,7 +590,6 @@ def plot_syn_freqs(site_name, models, freqs=[[0.15, 1],[0.15, 5]], lowcut=0.15, 
                 f = [lowcut, f]
             vel = vel_syn[model][site_name]
             fvel = filt(vel[comp], 1 / vel['dt'], lowcut=f[0], highcut=f[1], causal=False)
-            print(model, f[-1], np.max(vel[comp]), np.max(fvel))
             ax[0].plot(np.arange(len(vel[comp])) * vel['dt'], fvel + vmax * (j * nm + i),
                     color=f'C{i+1}', lw=1.2, label=f'{model}' if j == 0 else None)
             valign = 'top'
@@ -609,7 +649,87 @@ def plot_syn_freqs(site_name, models, freqs=[[0.15, 1],[0.15, 5]], lowcut=0.15, 
     return fig
 
 
-def comp_cum_energy(vel, dt=0, lowcut=0.15, highcut=5, cav=False):
+class AnchoredHScaleBar(matplotlib.offsetbox.AnchoredOffsetbox):
+    """ size: length of bar in data units
+        extent : height of bar ends in axes units """
+    def __init__(self, size=1, extent = 0.03, label="", loc=2, ax=None,
+                 pad=0.4, borderpad=0.5, ppad = 0, sep=2, prop=None, 
+                 frameon=True, linekw={}, **kwargs):
+        if not ax:
+            ax = plt.gca()
+        trans = ax.get_xaxis_transform()
+        size_bar = mpl.offsetbox.AuxTransformBox(trans)
+        line = Line2D([0,size],[0,0], **linekw)
+        vline1 = Line2D([0,0],[-extent/2.,extent/2.], **linekw)
+        vline2 = Line2D([size,size],[-extent/2.,extent/2.], **linekw)
+        size_bar.add_artist(line)
+        size_bar.add_artist(vline1)
+        size_bar.add_artist(vline2)
+        txt = matplotlib.offsetbox.TextArea(label, minimumdescent=False)
+        self.vpac = matplotlib.offsetbox.VPacker(children=[size_bar,txt],  
+                                 align="center", pad=ppad, sep=sep) 
+        matplotlib.offsetbox.AnchoredOffsetbox.__init__(self, loc, pad=pad, 
+                 borderpad=borderpad, child=self.vpac, prop=prop, frameon=frameon,
+                 **kwargs)
+        
+def plot_trace_comp(models, f, isite, site_name, comps='XYZ', gof='tf_misfit', labels=None, ratios=[1], unit='cm', cav=True, vel_syn=None, plot_rec=False, save=False, sfile=""):
+    if not vel_syn:
+        vel_syn = pick_vel()
+    if plot_rec:
+        models = models + ['rec']
+        labels = labels if not labels else labels + ['Data']
+    ratios = force_iterable(ratios)
+    if len(ratios) != len(comps):
+        ratios += ratios[-1] * (len(comps) - len(ratios))
+    r_unit = 100 if unit == 'cm' else 1
+    f_low = 0.15  # lowcut frequency
+    orient = {'X': 'E-W', 'Y': 'N-S', 'Z': 'UP'}
+    tf_misfit = pickle.load(open('results/tf_misfit.pickle', 'rb'))
+    gof = pickle.load(open('results/gof.pickle', 'rb'))
+    #met = pickle.load(open('results/metrics.pickle', 'rb'))
+    f = f if isinstance(f, collections.Iterable) else (f_low, f)
+    fig, ax = plt.subplots(len(comps), 2, dpi=500, gridspec_kw={'width_ratios': [3, 1]})
+    colors = list(mcolors.TABLEAU_COLORS.keys())
+    fig.tight_layout()
+    fig.suptitle(f'Site {isite}  {gof[(0.15, 2.5)][models[0]][site_name]["rhypo"]:.2f} km', y=1.1)
+    for j, model in enumerate(models):
+        dt = vel_syn[model][site_name]['dt']  
+        nt = len(vel_syn[model][site_name]['X'])
+        vel = filt(vel_syn[model][site_name], 1 / dt, f[0], f[1])
+        cumvel = comp_cum_energy(vel_syn[model][site_name], lowcut=f[0], highcut=f[1], cav=cav)
+        for i, comp in enumerate(comps): 
+            ix = ax[i] if len(comps) > 1 else ax
+            dy = np.mean([np.max(vel_syn[m][site_name][comp] * r_unit) for m in models]) * ratios[i]
+            ix[0].plot(np.arange(nt) * dt, vel[comp] * r_unit - j * dy, c=colors[j])
+            ix[0].annotate(f'{r_unit * np.max(np.abs(vel[comp])):.2f} cm/s', (nt * dt, vel[comp][0] - j * dy), xytext=(0, 6), textcoords="offset points", ha='right', va='center', fontsize=10) 
+            ix[1].plot(np.arange(nt) * dt, cumvel[comp] * r_unit, c=colors[j], label=model if not labels else labels[j])
+       
+    for i, comp in enumerate(comps):
+        ix = ax[i] if len(comps) > 1 else ax
+        ix[0].tick_params(bottom=False, left=False, labelleft=False, labelbottom=False)
+        ix[0].set_ylabel(orient[comp], labelpad=-10)
+        ix[0].set_frame_on(False)
+        ix[1].tick_params(bottom=True, left=True)
+    ix = ax[0] if len(comps) > 1 else ax
+    ix[0].set_title('Seismograms (cm/s)', pad=10)
+    ix[1].set_title('CAV (cm)' if cav else r'Cum. Energy (cm$^2$/s)', pad=10)
+    ix = ax[-1] if len(comps) > 1 else ax
+    ix[0].set_xlabel('Time (s)')
+    ix[1].set_xlabel('Time (s)')
+    if labels != False:
+        ix[1].legend(loc=2, fontsize=5, frameon=True, fancybox=True)
+    scale = 5
+    ob = AnchoredHScaleBar(size=15, label=f"{scale} sec", loc=3, frameon=False, pad=0.6, sep=5, linekw=dict(color="k", linewidth=0.8), bbox_to_anchor=(0.02, -0.1 * len(comps)), bbox_transform=ix[0].transAxes) 
+    ix[0].add_artist(ob)
+
+    if save:
+        saveto = sfile if sfile else f'trace_comp_{site_name}'
+        fig.savefig(f"results/{saveto}.png", dpi=500, bbox_inches='tight', pad_inches=0.05)
+
+    return fig, ax
+            
+
+def comp_cum_energy(vel, dt=0, lowcut=0.15, highcut=5, cav=False, average=False):
     '''Compute cumulative energy from velociteis
     Input:
         vel (dict or list) : velocities
@@ -624,11 +744,14 @@ def comp_cum_energy(vel, dt=0, lowcut=0.15, highcut=5, cav=False):
         keys.remove('dt')
         if 'shift' in keys:
             keys.remove('shift')
-        cumvel = np.zeros((len(vel[keys[0]]),), dtype='float32')
+        cumvel = collections.defaultdict(lambda : np.zeros((len(vel[keys[0]]),), dtype='float32'))
         for k in keys:
-            v = filt(vel[k], dt=dt, lowcut=lowcut, highcut=highcut)
-            cumvel += comp_cum_energy(v, dt=dt, cav=cav)
-        return cumvel / len(keys)
+            v = filt(vel[k], 1 / dt, lowcut=lowcut, highcut=highcut)
+            cumvel[k] = comp_cum_energy(v, dt=dt, cav=cav)
+        if average:
+            cumvel = [[cumvel[k]] for k in keys]
+            return np.mean(cumvel, axis=0)
+        return cumvel
     vel = np.array(vel)
     if cav:
         return np.cumsum(np.abs(vel)) * dt
@@ -653,8 +776,8 @@ def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, dh=0.008,
         if i > nrow * ncol - 1:
             break
         row, col = i // ncol, i % ncol
-        ax[row, col].set_xticks([], [])
-        ax[row, col].set_yticks([], [])
+        ax[row, col].axis('off')
+        ax[row, col].set_frame_on(True)
         if i >= len(nsites):
             if col == ncol - 1 and row == nrow - 2:
                 ax[row, col].legend(*ax[0][0].get_legend_handles_labels(), loc='upper left', bbox_to_anchor=(0, 1.2), bbox_transform=ax[row, col].transAxes)
@@ -664,23 +787,23 @@ def plot_cum_energy(models, nrow=4, ncol=3, lowcut=0.15, highcut=5, dh=0.008,
         j =  nsites[i]
         site_name = syn_sites[j][0]
         for model in models:
-            cumvel = comp_cum_energy(vel_syn[model][site_name], lowcut=lowcut, highcut=highcut, cav=cav)
+            cumvel = comp_cum_energy(vel_syn[model][site_name], lowcut=lowcut, highcut=highcut, cav=cav, average=True)
             ax[row, col].plot(vel_syn[model][site_name]['dt'] * np.arange(len(vel_syn[model][site_name]['X'])), cumvel, label=model)
-        cumvel = comp_cum_energy(vel_syn['rec'][site_name], lowcut=lowcut, highcut=highcut, cav=cav)
+        cumvel = comp_cum_energy(vel_syn['rec'][site_name], lowcut=lowcut, highcut=highcut, cav=cav, average=True)
         ax[row, col].plot(vel_syn['rec'][site_name]['dt'] * np.arange(len(vel_syn['rec'][site_name]['X'])), cumvel, '--', label='rec')
         if 'vs30' in locals():
             title = 'Vs30'
             vs = vs30
         else:
             title = 'Vs'
-        ax[row, col].set_title(f'Site {j}, {title}={vs[syn_sites[j][1], syn_sites[j][2]]:.1f} m/s')
+        ax[row, col].set_title(f'Site {j}, {title}={vs[syn_sites[j][2], syn_sites[j][1]]:.1f} m/s')
     if save:
         saveto = sfile if sfile else f'cum_{"vel" if cav else "ener"}_{models[0]}_{lowcut:.1f}_{highcut:.1f}hz'
         fig.savefig(f"results/{saveto}.svg", dpi=400, bbox_inches='tight', pad_inches=0.05)
     return fig
                             
 
-def plot_interp_map(model, mx, my, f=(0.15, 2.5), metric='pgv', syn_sites=None, topography=None, step=5, sx=2753, sy=1827):
+def plot_interp_map(model, mx, my, f=(0.15, 2.5), metric='pgv', syn_sites=None, topography=None, step=5, sx=1878, sy=2735):
     x, y = np.meshgrid(np.arange(0, mx, step), np.arange(0, my, step))
     met = pickle.load(open('results/metrics.pickle', 'rb'))
     xi = np.zeros(len(syn_sites))
@@ -694,7 +817,7 @@ def plot_interp_map(model, mx, my, f=(0.15, 2.5), metric='pgv', syn_sites=None, 
     print(zi)
     z = griddata((xi, yi), zi, (x, y), method='cubic')
     image = ax.contourf(x, y, z, cmap='hot_r')
-    ax.scatter(sx, sy, 300, color='k', marker='*')
+    ax.scatter(sy, sx, 300, color='k', marker='*')
     ax.contour(x, y, np.rot90(topography[::step, ::step]), 5, cmap='cividis', linewidths=0.5)
     plt.colorbar(image, ax=ax, orientation='vertical')
     im = ax.scatter(xi, yi, s=200, marker='^', c=zi, cmap='binary')
@@ -702,33 +825,34 @@ def plot_interp_map(model, mx, my, f=(0.15, 2.5), metric='pgv', syn_sites=None, 
     return
 
 
-def plot_metric_map(mx, my, models, f=1, metric='pgv', vmax = 1e6, topography=None, nd=250, step=5, sx=2753, sy=1827, syn_sites={}, save=False, sfile=""):
+def plot_metric_map(mx, my, models, f=(0.15, 2.5), lowcut=0.15, metric='pgv', vmax = 1e6, topography=None, nd=250, step=5, sx=1878, sy=2735, syn_sites={}, save=False, sfile=""):
     sx, sy = (sx - nd) // step, (sy - nd) // step
     val = collections.defaultdict()
     fig, ax = plt.subplots((len(models) - 1) // 2 + 1, 2, dpi=200)
     plt.suptitle(f'{metric} at {f} Hz', y=1.05)
     fig.tight_layout()
     plt.subplots_adjust(left=0.15, right=0.85, wspace=-0.1, hspace=0.6)
+    f = f if isinstance(f, collections.Iterable) else (lowcut, f)
     for i, model in enumerate(models):
-        val[model] = np.fromfile(f'{model}/{metric}_{f:05.2f}Hz.bin', dtype='f').reshape(my, mx)
+        val[model] = np.fromfile(f'{model}/{metric}_{f[0]:05.2f}_{f[1]:05.2f}Hz.bin', dtype='f').reshape(my, mx)[nd : -nd : step, nd : -nd : step]
         # TODO
         # Compute these metrics at each site
         vmax = min(vmax, 0.85 *  np.max(val[models[0]]))
         vmin = np.min(val[models[0]])
         im = ax[i // 2, i % 2].imshow(val[model][nd:-nd:step, nd:-nd:step].T, cmap='bwr', vmin=vmin, vmax=vmax)
         ax[i // 2, i % 2].contour(topography[nd:-nd:step, nd:-nd:step].T, 5, cmap='cividis', linewidths=0.5)
-        ax[i // 2, i % 2].scatter(sx, my - sy, 50, color='g', marker='*')
+        ax[i // 2, i % 2].scatter(sy, my - sx, 50, color='g', marker='*')
         cbar = plt.colorbar(im, ax=ax[i // 2, i % 2], ticks=np.linspace(vmin, vmax, 5))
         ax[i // 2, i % 2].set_title(model, y=1.05)
     if i % 2 == 0:
         fig.delaxes(ax[-1, -1])
     if save:
         saveto = sfile if sfile else f'{metric}_{models[0]}_{f:.1f}hz'
-        fig.savefig(f"results/{saveto}.svg", dpi=400, bbox_inches='tight', pad_inches=0.05)
+        fig.savefig(f"results/{saveto}.png", dpi=600, bbox_inches='tight', pad_inches=0.05)
     return fig
 
 
-def plot_diff_map(mx, my, models, f=(2.5, 5), metric='pgv', vmax=2, lowcut=0.15, topography=None, nd=250, step=5, sx=2753, sy=1827, dh=0.008, save=False, sfile=""):
+def plot_diff_map(mx, my, models, f=(2.5, 5), metric='pgv', vmax=2, titles=[], lowcut=0.15, topography=None, nd=250, step=5, sx=1878, sy=2735, dh=0.008, save=False, sfile=""):
     '''plot ratio map and histogram
     Input
     -----
@@ -740,38 +864,45 @@ def plot_diff_map(mx, my, models, f=(2.5, 5), metric='pgv', vmax=2, lowcut=0.15,
     nd : int
         Absorbing layers
     '''
-    if "noqf_orig" not in models:
-        print('Model "noqf_orig" is needed')
-        return None
     # sx, sy = (sx - nd) // step, (sy - nd) // step
     sx, sy = (sx - nd) * dh, (sy - nd) * dh
+    ylabel = {'gof': r'GOF', 'pgv': r'PGV (m/s)', 'pga': r'PGA (m/s$^2$)',
+            'ener': r'ENER (m$^2$/s)', 'arias': r'Arias (m/s)', 'dur': 'DUR (s)'}
     val = collections.defaultdict()
-    f = (lowcut, f) if type(f) != list and type(f) != tuple else tuple(f)
+    f = f if isinstance(f, collections.Iterable) else (lowcut, f)
     for model in models:
         val[model] = np.fromfile(f'{model}/{metric}_{f[0]:05.2f}_{f[1]:05.2f}Hz.bin', dtype='f').reshape(my, mx)[nd : -nd : step, nd : -nd : step]
 
     vmax = min(vmax, 0.8 * np.max(val[models[0]]), 0.8 * np.max(val[models[1]]))
     vmin = max(np.min(val[models[0]]), np.min(val[models[1]]))
 
-    fig, ax = plt.subplots((len(models) - 1) // 2 + 1, 2, dpi=200)
-    fig.tight_layout()
+    fig, ax = plt.subplots((len(models) - 1) // 2 + 1, 2, dpi=400)
+    # plt.suptitle(f'Comparison of {metric} at {f[0]}-{f[1]} Hz', y=1.05)
+    # fig.tight_layout()
+    fig.subplots_adjust(bottom=0.1, top=0.9, right=0.8, wspace=0.25)
     for i, model in enumerate(models):
         im = ax[i].imshow(val[model].T, cmap='bwr', vmin=vmin, vmax=vmax, extent=[0, (mx - 2 * nd) * dh, 0, (my - 2 * nd) * dh])
-        cbar = plt.colorbar(im, ax=ax[i], orientation='horizontal', ticks=np.linspace(vmin, vmax, 5))
-        cbar.ax.set_xlabel(f'{models[i]}')
         CS = ax[i].contour(np.arange(0, mx - 2 * nd, step) * dh, np.arange(my - 2 * nd, 0, -step) * dh, topography[nd:-nd:step, nd:-nd:step].T, [0, 50, 100, 150, 250, 400], cmap='cividis', linewidths=0.8)
         ax[i].clabel(CS, fmt='%d', inline=True, fontsize=8)
-        ax[i].scatter(sx, sy, 200, color='g', marker='*')
-        ax[i].set_title(f'Max = {np.max(val[model]):.2f}; Min = {np.min(val[model]):.2f}', y=1.04)
-    plt.suptitle(f'Comparison of {metric} at {f[0]}-{f[1]} Hz', y=1.05)
+        ax[i].scatter(sy, sx, 200, color='g', marker='*')
+#        ax[i].set_title(f'{titles[i] if titles else models[i]}\n' + fr'Max = {np.max(val[model]):.2f} m/s$^2$; Min = {np.min(val[model]):.2f} m/s$^2$', y=1.04)
+        ax[i].set_title(f'{titles[i] if titles else models[i]}')
+        ax[i].set(xlabel = 'X (km)', ylabel = 'Y (km)')
+        ax[i].text(0.4, 21, f'Max = {np.max(val[model]):.2f} m/s$^2$', color='w', fontweight='bold')
+        ax[i].text(0.4, 19, f'Min = {np.min(val[model]):.2f} m/s$^2$', color='w', fontweight='bold')
+    cax = fig.add_axes([0.85, 0.30, 0.02, 0.4])
+    ticks = np.linspace(vmin, vmax, 5)
+    cbar = fig.colorbar(im, cax=cax, orientation='vertical', ticks=ticks)
+    cbar.ax.set_yticklabels([f'{i:.2f}' for i in ticks])
+    cbar.ax.set_ylabel(ylabel[metric])
     if save:
-        saveto = sfile if sfile else f'cum_vel_{models[0]}_{f[0]:.2f}_{f[1]:.1f}hz'
-        fig.savefig(f"results/{saveto}.svg", dpi=400, bbox_inches='tight', pad_inches=0.05)
+        saveto = sfile if sfile else f'comp_{metric}_{models[0]}_{f[0]:.2f}_{f[1]:.1f}hz'
+        fig.savefig(f"results/{saveto}.svg", dpi=500, bbox_inches='tight', pad_inches=0.05)
                             
     return fig
 
 
-def plot_diff_hist(mx, my, models, freqs=[1, 5], metric='pgv', vmax=2, lowcut=0.15, topography=None, nd=250, step=5, sx=2753, sy=1827, save=False, sfile=""):
+def plot_diff_hist(mx, my, models, freqs=[1, 5], metric='pgv', vmax=2, lowcut=0.15, topography=None, nd=250, step=5, sx=1878, sy=2735, save=False, sfile=""):
     '''plot ratio map and histogram
     Input
     -----
@@ -816,7 +947,7 @@ def plot_diff_hist(mx, my, models, freqs=[1, 5], metric='pgv', vmax=2, lowcut=0.
         cbar.ax.set_ylabel('Ratio')
         CS = ax[0, i].contour(topography[nd:-nd:step, nd:-nd:step].T, [0, 50, 100, 150, 250, 400], cmap='cividis', linewidths=0.8)
         ax[0, i].clabel(CS, fmt='%d', inline=True, fontsize=8)
-        ax[0, i].scatter(sx, my //step - sy, 150, color='g', marker='*')
+        ax[0, i].scatter(sy, my //step - sx, 150, color='g', marker='*')
         ax[0, i].set_title(f'Median ratio = {100 * np.median(val_dif[f]):.3f}%, f = {f[0]:.1f}-{f[1]:.1f}Hz', y=1.05)
 
     val_dif_tmp = np.divide(val_dif[freqs[1]], val_dif[freqs[0]], out=np.zeros_like(val_dif[freqs[0]]), where=val_dif[freqs[0]]!=0)
@@ -825,7 +956,7 @@ def plot_diff_hist(mx, my, models, freqs=[1, 5], metric='pgv', vmax=2, lowcut=0.
     ax[1, 0].set_title(f'({freqs[1][0]:.1f}-{freqs[1][1]:.1f})Hz / ({freqs[0][0]:.1f}-{freqs[0][1]:.1f})Hz', y=1.05)
     CS = ax[1, 0].contour(topography[nd:-nd:step, nd:-nd:step].T, [0, 50, 100, 150, 250, 400], cmap='cividis', linewidths=0.8)
     ax[1, 0].clabel(CS, fmt='%d', inline=True, fontsize=8)
-    ax[1, 0].scatter(sx, my // step - sy, 150, color='g', marker='*')
+    ax[1, 0].scatter(sy, my // step - sx, 150, color='g', marker='*')
 
     bins = np.linspace(vmin, vmax, 12)
     ax[1, 1].hist([np.ravel(val_dif[f]) for f in freqs], bins, label=[f'{f[0]:.2f}-{f[1]:.1f}Hz' for f in freqs], density=True)
@@ -871,10 +1002,7 @@ def prepare_tf_misfit(model, vel_syn=None, fmin=0.15, fmax=5, exec_path='results
                 fid.write(f'{len(vel_syn[model][k]["X"])}\n{vel_syn[model][k]["dt"]}\n{fmin} {fmax}\n'
                           f'syn_{k}.dat\nrec_{k}.dat\n3\n.{IS_S2_REFERENCE}.\n.{LOCAL_NORM}.') 
             command = ['./tf_misfits_gof', 'HF_TF-MISFIT_GOF']
-            p = subprocess.call(command,
-                                stdout = subprocess.PIPE,
-                                stdin  = subprocess.PIPE,
-                                stderr = subprocess.STDOUT )
+            p = call_sub(command)
             tf_misfit[k] = np.genfromtxt('MISFIT-GOF.DAT')
             print(f"\rDone {j} / {len(vel_syn['rec'].keys())}", end='\r', flush=True)
             os.remove('MISFIT-GOF.DAT')
@@ -886,7 +1014,7 @@ def prepare_tf_misfit(model, vel_syn=None, fmin=0.15, fmax=5, exec_path='results
     return tf_misfit
 
 
-def plot_tf_misfit(f=(0.15, 5), metric='EG', ref='pgv'):
+def plot_tf_misfit(f=(0.15, 5), metric='EG', ref='pgv', radius=100000):
     '''
     Input:
         f (tuple) : lowcut and highcut frequency
@@ -904,6 +1032,7 @@ def plot_tf_misfit(f=(0.15, 5), metric='EG', ref='pgv'):
     with open('results/tf_misfit.pickle', 'rb') as fid:
         tf_misfit = pickle.load(fid) 
     met = pickle.load(open(f'results/metrics.pickle', 'rb'))
+    gof = pickle.load(open(f'results/gof.pickle', 'rb'))
     colors = list(mcolors.TABLEAU_COLORS.keys())
     comps = 'XYZ'
     cases = ['noqf_orig', 'topo_noqf_orig', 'noqf_s05h005l100', 'topo_qf06_s05h005l100']
@@ -915,7 +1044,7 @@ def plot_tf_misfit(f=(0.15, 5), metric='EG', ref='pgv'):
 
                 model = f'dhyp{dhyp:.2f}_s{seed}_{case}' if dhyp != 0.5 else case
                 try:
-                    data = np.mean(list(tf_misfit[f][model][key][xi + i, yi] for key in tf_misfit[f][model].keys())) 
+                    data = np.mean(list(tf_misfit[f][model][key][xi + i, yi] for key in tf_misfit[f][model].keys() if gof[f][model][key]['rhypo'] < radius)) 
                     if 'G' in metric:  # Goodness of Fit ~ [0-1]
                         data /= 10
                     r = np.mean(list(met[f][model][site][ref] / met[f]['rec'][site][ref] for site in met[f]['rec'].keys()))
@@ -932,7 +1061,7 @@ def plot_tf_misfit(f=(0.15, 5), metric='EG', ref='pgv'):
     ax[0].legend(bbox_to_anchor=(1, .5), loc='lower left', bbox_transform=plt.gcf().transFigure, fancybox=True)
 
 
-def plot_tf_misfit_mesh(models, f=(0.15, 5), ref='pga'):
+def plot_tf_misfit_mesh(models, f=(0.15, 5), ref='pga', radius=10000):
     '''
     Input:
         f (tuple) : lowcut and highcut frequency
@@ -944,6 +1073,7 @@ def plot_tf_misfit_mesh(models, f=(0.15, 5), ref='pga'):
     with open('results/tf_misfit.pickle', 'rb') as fid:
         tf_misfit = pickle.load(fid) 
     met = pickle.load(open(f'results/metrics.pickle', 'rb'))
+    gof = pickle.load(open(f'results/gof.pickle', 'rb'))
     colors = list(mcolors.TABLEAU_COLORS.keys())
     comps = 'XYZ'
     fig, ax = plt.subplots(1, 3, figsize=(6, 3), dpi=400, sharey=True)
@@ -951,21 +1081,21 @@ def plot_tf_misfit_mesh(models, f=(0.15, 5), ref='pga'):
     for i in range(3):
         for j, model in enumerate(models):
             try:
-                EG = np.mean(list(tf_misfit[f][model][key][3 + i, 0] for key in tf_misfit[f][model].keys())) / 10
-                PG = np.mean(list(tf_misfit[f][model][key][3 + i, 1] for key in tf_misfit[f][model].keys())) / 10
-                r = np.mean(list(met[f][model][site][ref] / met[f]['rec'][site][ref] for site in met[f]['rec'].keys()))
+                EG = np.mean(list(tf_misfit[f][model][key][3 + i, 0] for key in tf_misfit[f][model].keys() if gof[f][model][key]['rhypo'] < radius)) / 10
+                PG = np.mean(list(tf_misfit[f][model][key][3 + i, 1] for key in tf_misfit[f][model].keys() if gof[f][model][key]['rhypo'] < radius)) / 10
+                r = np.mean(list(met[f][model][site][ref] / met[f]['rec'][site][ref] for site in met[f]['rec'].keys() if gof[f][model][site]['rhypo'] < radius))
                 marker = '^' if r >= 1 else 'v'
                 ax[i].scatter(EG, j, 40 * r ** 1.5, marker=marker, c=colors[0],
                         label='Env GoF' if j == 0 else None)
                 ax[i].scatter(PG, j, 40 * r ** 1.5, marker=marker, c=colors[1],
                         label='Phase GoF' if j == 0 else None)
-            except:
-                print(model)
+            except Exception as e:
+                print(model, e)
                 break
 
-        ax[i].set(yticks=range(len(models) + 1), xlabel=f'GoF-{comps[i]}')
+        ax[i].set(ylim=(-0.5, len(models) - 0.5), yticks=range(len(models) + 1), xlabel=f'GoF-{comps[i]}')
     ax[0].set_yticklabels(models, rotation=0)
-    ax[-1].legend(bbox_to_anchor=(1., 0.5), loc='lower left', fancybox=True)
+    ax[-1].legend(bbox_to_anchor=(1., 0.5), bbox_transform=plt.gcf().transFigure, loc='lower left', frameon=True, fancybox=True)
 
 
 def comp_metrics(vel_syn=None, lowcut=0.15, highcut=5, tmax=35, save=False):
@@ -1009,8 +1139,11 @@ def comp_metrics(vel_syn=None, lowcut=0.15, highcut=5, tmax=35, save=False):
                 accx = np.diff(vx, prepend=0) 
                 accy = np.diff(vy, prepend=0)
                 accz = np.diff(vz, prepend=0)
-
-                x_5, x_75 = np.argwhere(cx >= 0.05 * cx[-1])[0], np.argwhere(cx >= 0.75 * cx[-1])[0]
+                try:
+                    x_5, x_75 = np.argwhere(cx >= 0.05 * cx[-1])[0], np.argwhere(cx >= 0.75 * cx[-1])[0]
+                except:
+                    print(model, site_name, cx.shape, np.max(cx))
+                    break
                 y_5, y_75 = np.argwhere(cy >= 0.05 * cy[-1])[0], np.argwhere(cy >= 0.75 * cy[-1])[0]
                 z_5, z_75 = np.argwhere(cz >= 0.05 * cz[-1])[0], np.argwhere(cz >= 0.75 * cz[-1])[0]
                 metrics[key][model][site_name]['ener'] = np.sum(vx ** 2 + vy ** 2 + vz ** 2) * dt / 3
@@ -1030,8 +1163,8 @@ def errorf(x, y):
     return 100 * erfc(2 * abs(x - y) / (x + y))
 
 
-def comp_GOF(freqs, models, metrics=['arias', 'dur', 'ener', 'pga', 'pgv'], syn_sites={}, sx=2753,
-             sy=1827, sz=708, dh=0.008, lowcut=0.15, vs=None, topography=None, save=True):
+def comp_GOF(freqs, models, metrics=['arias', 'dur', 'ener', 'pga', 'pgv'], syn_sites={}, sx=1878,
+             sy=2735, sz=708, dh=0.008, lowcut=0.15, vs=None, topography=None, save=True):
 
     met = pickle.load(open(f'results/metrics.pickle', 'rb'))
     gof = {}
@@ -1050,16 +1183,14 @@ def comp_GOF(freqs, models, metrics=['arias', 'dur', 'ener', 'pga', 'pgv'], syn_
             if model == 'rec':
                 continue
             met_syn = met[f][model]
-            gof[f][model] = {}
+            gof[f][model] = collections.defaultdict(dict)
             for site in syn_sites:
                 site_name = site[0]
-                gof[f][model][site_name] = collections.defaultdict(int)
                 gof[f][model][site_name]['rhypo'] = np.sqrt((site[2] - sx) ** 2 + (site[1] - sy) ** 2 + sz ** 2) * dh
-                gof[f][model][site_name]['elev'] = topography[site[1], site[2]]
-                gof[f][model][site_name]['vs'] = vs[site[1], site[2]]
-                for metric in metrics:
-                    gof[f][model][site_name]['gof'] += errorf(met_syn[site_name][metric], met_rec[site_name][metric])
-                gof[f][model][site_name]['gof'] /= len(metrics)
+                gof[f][model][site_name]['elev'] = topography[site[2], site[1]]
+                gof[f][model][site_name]['vs'] = vs[site[2], site[1]]
+                gof[f][model][site_name]['gof'] = np.mean([errorf(met_syn[site_name][metric], met_rec[site_name][metric]) for metric in metrics])
+    
     met = f'_{metrics[0]}' if len(metrics) == 1 else ""
     with open(f'results/gof{met}.pickle', 'wb') as fid:
         pickle.dump(gof, fid, protocol=pickle.HIGHEST_PROTOCOL)
@@ -1078,8 +1209,8 @@ def plot_gof(freqs, models, metric="gof", syn_sites={}, lowcut=0.15, window=2):
         met = pickle.load(open(f'results/metrics.pickle', 'rb'))
     freqs = [freqs] if type(freqs) != list else freqs
     models = [models] if type(models) != list else models
-    ylabel = {'gof': r'$GOF$', 'pgv': r'$PGV (m/s)$', 'pga': r'$PGA (m/s^2)$',
-              'ener': r'$ENER (m^2/s)$', 'arias': r'$Arias (m/s)$'}
+    ylabel = {'gof': r'GOF', 'pgv': r'PGV (m/s)', 'pga': r'PGA (m/s$^2$)',
+            'ener': r'ENER (m$^2$/s)', 'arias': r'Arias (m/s)', 'dur': 'DUR (s)'}
 
     fig, ax = plt.subplots(3, 1, figsize=(6, 8), dpi=200)
     fig.subplots_adjust(top=0.7, hspace=0.4, wspace=0.2)
@@ -1124,6 +1255,56 @@ def plot_gof(freqs, models, metric="gof", syn_sites={}, lowcut=0.15, window=2):
         if metric != 'gof':
             ix.set_yscale('log')
     return fig
+
+
+def plot_gof_gmt(model, f, metric='tf_misfit', env=0, radius=100000, src_lon=-117.932587, src_lat=33.918633):
+    '''
+    Plot GOF maps using GMT for metric like "metric" or "gof" or "tf_misfit"
+    Input:
+        model (string) : 
+        f (tuple) : (low, high)
+        metric (string) : metric type to plot
+        env (int) : Eg(env=0) or PG(env=1) for tf_misfit
+        radius (int) : radius to rule out stations if set properly
+    '''
+    # env: 0 for EG, 1 for PG
+    syn_sites = pickle.load(open('results/syn_sites.pickle', 'rb'))
+    gof = pickle.load(open('results/gof.pickle', 'rb'))
+    tf_misfit = pickle.load(open('results/tf_misfit.pickle', 'rb'))
+    site_lonlat = np.genfromtxt('la_habra_small_statlist_3456.txt', delimiter=" ", dtype="S8, f, f")
+
+    fname = f'{metric}_{model}_{f[0]}_{f[1]}hz'
+    with open(f'results/{fname}.txt', 'w') as fid:
+        for i in range(len(site_lonlat)):
+            try:
+                if metric == 'tf_misfit':
+                    data = np.mean(tf_misfit[f][model][syn_sites[i][0]][3:, env])
+                    data *= 10  # GOF: 0-10 to 0-100
+                else:
+                    data = gof[f][model]['gof'][0]
+            except:
+                return
+            fid.write(f'{site_lonlat[i][1]:.5f} {site_lonlat[i][2]:.5f} {data:.5f}\n')
+
+    gmt_cmd = (f'model_region="-R-118.209/-117.785/33.693/34.045"\n'
+               f'gmt begin results/{fname} png\n'
+               f'gmt basemap -JM15c $model_region -Baf -BSWen\n'
+               f'gmt makecpt -Cgray -D -V -I -T-1000/3412/10\n'
+               f'gmt grdimage @earth_relief_15s -I+d -t30\n'
+               f'gmt surface results/{fname}.txt $model_region -Ginterp1.grd -I128e/128e -T0.15\n'
+               f'gmt grdsample interp1.grd $model_region -Ginterp.grd -I8e/8e\n'
+               f'gmt grdclip interp.grd -Gclip.grd -Sa79.9/79.9 -Sb20.0001/20.0001\n'
+               f'gmt makecpt -Cpolar -T20/80/0.1\n'
+               f'gmt grdimage clip.grd -I+d\n'
+               f'gmt colorbar -DjMR+o-1c/0+m -I0.3 -Bxa10+lEGOF\n'
+               f'gmt plot results/{fname}.txt -St0.4c -C -W1p,black -l"Station"\n'
+               f'gmt plot borders.txt -W4p,lightblue -L\n'
+               f'echo {src_lon} {src_lat} | gmt plot -Sa0.7c -Ggreen -l"La Habra"\n'
+               f'gmt end')
+    with open('plot_gof.gmt', 'w') as fid_gmt:
+        fid_gmt.write(gmt_cmd)
+    cmd = 'bash plot_gof.gmt'
+    call_sub(cmd, shell=True)
 
 
 if __name__ == "__main__":
