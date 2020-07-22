@@ -38,6 +38,8 @@ from filter_BU import filt_B
 import my_pyrotd
 from post_processing import __version__
 
+mpl.rcParams['figure.dpi'] = 600
+
 __author__ = "Zhifeng Hu"
 __copyright__ = "Zhifeng Hu, SDSU/UCSD"
 __license__ = "mit"
@@ -53,11 +55,11 @@ def call_sub(cmd, shell=False):
     return p
 
 
-def read_param(model):
+def read_param(model, conf_file='param.sh'):
     '''Read parameters from local "param.sh"
     '''
     tmax = dt = tskip = wstep = nfile = 1
-    with open(Path(model, 'param.sh'), 'r') as fid:
+    with open(Path(model, conf_file), 'r') as fid:
         for line in fid:
             if "TMAX" in line:
                 tmax = float(re.findall(r'(?<=TMAX )\d+\.+\d+(?= )', line)[0])
@@ -152,8 +154,8 @@ def read_snapshot(it, mx, my, model="", case="", comp="X"):
     tmax, dt, tskip, wstep, _ = read_param(model)
     nt = int(tmax / dt)
     model = Path(model, "output_sfc" if not case else f"output_sfc_{case}")
-    fnum = int(np.ceil((it + 1) // (wstep * tskip) ) * wstep * tskip)
-    print(f'\r{it} / {nt}, fnum={fnum}', end="\r", flush=True)
+    fnum = int((it - 1) // (wstep * tskip) + 1) * wstep * tskip
+    print(f'\r{it} / {nt}, {model}/S{comp}_0_{fnum:07d}', end="\r", flush=True)
     fid = open(f'{model}/S{comp}_0_{fnum:07d}', 'rb')
     skip = 4 * ((it - fnum) // tskip + wstep) * mx * my
     fid.seek(skip, 0)
